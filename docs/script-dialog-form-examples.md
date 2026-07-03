@@ -102,6 +102,7 @@ await nct.dialog.alert('Required validation passed.');
 ## 3. Conditional Display
 
 Tests `visibleWhen`. Select `local` first: the remote fields should be hidden and omitted from the returned object. Select `remote`: the host field appears and becomes required because it is visible.
+`visibleWhen.field` must reference a field defined earlier in the form.
 
 ```javascript
 const values = await nct.dialog.form({

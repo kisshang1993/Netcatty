@@ -308,6 +308,33 @@ test("normalizeDialogFormSpec rejects invalid fields", () => {
     }),
     /requires exactly one condition operator/,
   );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [
+        { type: "textarea", name: "host", label: "Host", visibleWhen: { field: "target", equals: "remote" } },
+        { type: "select", name: "target", label: "Target", options: ["local", "remote"] },
+      ],
+    }),
+    /visibleWhen must reference an earlier field: host/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [{ type: "checkbox", name: "self", label: "Self", visibleWhen: { field: "self", truthy: true } }],
+    }),
+    /visibleWhen must reference an earlier field: self/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [{ type: "number", name: "count", label: "Count", defaultValue: -1, min: 0 }],
+    }),
+    /defaultValue cannot be less than min/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [{ type: "number", name: "count", label: "Count", defaultValue: 6, min: 1, step: 2 }],
+    }),
+    /defaultValue must match step from min/,
+  );
 });
 
 test("createScriptRuntime exposes form dialog API through showDialog", async () => {

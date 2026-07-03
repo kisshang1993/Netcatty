@@ -204,7 +204,15 @@ test("script dialog form applies visibleWhen to rendering validation and submit 
           label: "Local note",
           defaultValue: "local only",
           required: false,
-          visibleWhen: { field: "confirmRemote", falsy: true },
+          visibleWhen: { field: "target", equals: "local" },
+        },
+        {
+          type: "textarea",
+          name: "remoteDetail",
+          label: "Remote detail",
+          defaultValue: "hidden by hidden controller",
+          required: false,
+          visibleWhen: { field: "confirmRemote", truthy: true },
         },
       ],
     },
@@ -222,7 +230,7 @@ test("script dialog form applies visibleWhen to rendering validation and submit 
   const remoteValues = applyFormValue(applyFormValue(localValues, "target", "remote"), "confirmRemote", true);
   const remoteVisibleNames = getVisibleDialogFormFields(conditionalRequest.form!, remoteValues).map((field) => field.name);
 
-  assert.deepEqual(remoteVisibleNames, ["target", "host", "confirmRemote"]);
+  assert.deepEqual(remoteVisibleNames, ["target", "host", "confirmRemote", "remoteDetail"]);
   assert.deepEqual(validateDialogFormValues(conditionalRequest.form!, remoteValues, "Required"), {
     host: "Required",
   });
@@ -230,6 +238,50 @@ test("script dialog form applies visibleWhen to rendering validation and submit 
     target: "remote",
     host: "example.com",
     confirmRemote: true,
+    remoteDetail: "hidden by hidden controller",
+  });
+});
+
+test("script dialog form does not show fields chained from hidden controllers", () => {
+  const request: ScriptDialogRequest = {
+    ...formRequest,
+    form: {
+      ...formRequest.form!,
+      fields: [
+        {
+          type: "select",
+          name: "target",
+          label: "Target",
+          options: [
+            { label: "Local", value: "local" },
+            { label: "Remote", value: "remote" },
+          ],
+          defaultValue: "local",
+        },
+        {
+          type: "checkbox",
+          name: "advanced",
+          label: "Advanced",
+          defaultValue: true,
+          visibleWhen: { field: "target", equals: "remote" },
+        },
+        {
+          type: "textarea",
+          name: "advancedNote",
+          label: "Advanced note",
+          defaultValue: "should stay hidden",
+          visibleWhen: { field: "advanced", truthy: true },
+        },
+      ],
+    },
+  };
+
+  assert.deepEqual(
+    getVisibleDialogFormFields(request.form!, getInitialFormValues(request)).map((field) => field.name),
+    ["target"],
+  );
+  assert.deepEqual(normalizeDialogFormSubmitValues(request.form!, getInitialFormValues(request)), {
+    target: "local",
   });
 });
 

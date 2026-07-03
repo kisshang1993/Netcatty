@@ -111,6 +111,11 @@ function normalizeDialogCondition(condition, context = "Dialog visibleWhen") {
   };
 }
 
+function matchesNumberStep(value, step, base = 0) {
+  const quotient = (value - base) / step;
+  return Math.abs(quotient - Math.round(quotient)) < 1e-9;
+}
+
 function normalizeDialogField(field, seenNames) {
   if (!field || typeof field !== "object") {
     throw new Error("Dialog form field must be an object");
@@ -174,6 +179,20 @@ function normalizeDialogField(field, seenNames) {
     if (min !== undefined && max !== undefined && min > max) {
       throw new Error(`Dialog number field min cannot be greater than max: ${name}`);
     }
+    if (defaultNumber !== undefined && min !== undefined && defaultNumber < min) {
+      throw new Error(`Dialog number field defaultValue cannot be less than min: ${name}`);
+    }
+    if (defaultNumber !== undefined && max !== undefined && defaultNumber > max) {
+      throw new Error(`Dialog number field defaultValue cannot be greater than max: ${name}`);
+    }
+    if (
+      defaultNumber !== undefined
+      && step !== undefined
+      && min !== undefined
+      && !matchesNumberStep(defaultNumber, step, min)
+    ) {
+      throw new Error(`Dialog number field defaultValue must match step from min: ${name}`);
+    }
     return {
       ...base,
       placeholder: field.placeholder == null ? undefined : String(field.placeholder),
@@ -201,9 +220,14 @@ function normalizeDialogFormSpec(spec) {
   }
   const seenNames = new Set();
   const fields = spec.fields.map((field) => normalizeDialogField(field, seenNames));
-  for (const field of fields) {
+  const fieldIndexByName = new Map(fields.map((field, index) => [field.name, index]));
+  for (const [index, field] of fields.entries()) {
     if (field.visibleWhen && !seenNames.has(field.visibleWhen.field)) {
       throw new Error(`Dialog visibleWhen references unknown field: ${field.visibleWhen.field}`);
+    }
+    const dependencyIndex = field.visibleWhen ? fieldIndexByName.get(field.visibleWhen.field) : undefined;
+    if (dependencyIndex !== undefined && dependencyIndex >= index) {
+      throw new Error(`Dialog visibleWhen must reference an earlier field: ${field.name}`);
     }
   }
   return {

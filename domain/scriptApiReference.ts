@@ -57,7 +57,7 @@ Use \`waitForRegex(".*请选择SSH资源.*登录方式.*")\` for regex or output
 
 \`select\` and \`radio\` options may be strings or \`{ label, value, description?, disabled? }\`.
 \`textarea\` returns string values; \`number\` returns number values or \`undefined\` when optional and empty. \`number\` fields support submit-time \`min\`, \`max\`, and \`step\` validation.
-Fields may use \`visibleWhen: { field, equals|notEquals|truthy|falsy }\` for conditional display. Hidden fields are not validated and are omitted from the submitted object.
+Fields may use \`visibleWhen: { field, equals|notEquals|truthy|falsy }\` for conditional display; \`visibleWhen.field\` must reference an earlier field. Hidden fields are not validated and are omitted from the submitted object.
 \`form\` returns an object keyed by visible field \`name\`. Fields are required by default; set \`required: false\` for optional text/number fields.
 
 ### nct.progress

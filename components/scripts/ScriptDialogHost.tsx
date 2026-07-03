@@ -113,11 +113,27 @@ export function isDialogFieldVisible(
   field: ScriptDialogField,
   values: FormValues,
 ): boolean {
-  return field.visibleWhen ? evaluateDialogCondition(form, values, field.visibleWhen) : true;
+  return getVisibleDialogFormFields(form, values).some((visibleField) => visibleField.name === field.name);
 }
 
 export function getVisibleDialogFormFields(form: ScriptDialogForm, values: FormValues): ScriptDialogField[] {
-  return form.fields.filter((field) => isDialogFieldVisible(form, field, values));
+  const visibleFields: ScriptDialogField[] = [];
+  const visibleNames = new Set<string>();
+  for (const field of form.fields) {
+    if (!field.visibleWhen) {
+      visibleFields.push(field);
+      visibleNames.add(field.name);
+      continue;
+    }
+    if (!visibleNames.has(field.visibleWhen.field)) {
+      continue;
+    }
+    if (evaluateDialogCondition(form, values, field.visibleWhen)) {
+      visibleFields.push(field);
+      visibleNames.add(field.name);
+    }
+  }
+  return visibleFields;
 }
 
 export function validateDialogFormValues(
