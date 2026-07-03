@@ -9,6 +9,7 @@ import {
   getInitialFormValues,
   getVisibleDialogFormFields,
   normalizeDialogFormSubmitValues,
+  ScriptDialogFormBody,
   ScriptDialogFormFields,
   validateDialogFormValues,
 } from "./ScriptDialogHost.tsx";
@@ -149,6 +150,22 @@ test("script dialog form validates number min max and step before submit", () =>
   });
   assert.deepEqual(validateDialogFormValues(form, { delayMs: "" }, messages), {});
   assert.deepEqual(validateDialogFormValues(form, { delayMs: 5000 }, messages), {});
+
+  const defaultBasedForm = {
+    message: "Number limits",
+    fields: [{
+      type: "number" as const,
+      name: "oddCount",
+      label: "Odd count",
+      defaultValue: 5,
+      step: 2,
+    }],
+  };
+  assert.deepEqual(validateDialogFormValues(defaultBasedForm, { oddCount: 5 }, messages), {});
+  assert.deepEqual(validateDialogFormValues(defaultBasedForm, { oddCount: 7 }, messages), {});
+  assert.deepEqual(validateDialogFormValues(defaultBasedForm, { oddCount: 6 }, messages), {
+    oddCount: "Step 2",
+  });
 });
 
 test("script dialog form applies visibleWhen to rendering validation and submit payload", () => {
@@ -272,6 +289,21 @@ test("script dialog form fields do not render hidden visibleWhen controls", () =
 
   assert.match(markup, /Target/);
   assert.doesNotMatch(markup, /Remote host/);
+});
+
+test("script dialog form body renders fields inside a constrained scroll area", () => {
+  const values = getInitialFormValues(formRequest);
+  const markup = renderToStaticMarkup(
+    <ScriptDialogFormBody
+      form={formRequest.form!}
+      formValues={values}
+      onValueChange={() => {}}
+    />,
+  );
+
+  assert.match(markup, /data-radix-scroll-area-viewport/);
+  assert.match(markup, /min-h-0/);
+  assert.match(markup, /Environment/);
 });
 
 test("script dialog form fields render required errors", () => {

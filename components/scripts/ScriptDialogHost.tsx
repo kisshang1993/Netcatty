@@ -11,6 +11,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
@@ -65,6 +66,10 @@ function resolveValidationMessages(messages: FormValidationMessages = 'Required'
 function matchesNumberStep(value: number, step: number, base = 0) {
   const quotient = (value - base) / step;
   return Math.abs(quotient - Math.round(quotient)) < 1e-9;
+}
+
+function getNumberStepBase(field: Extract<ScriptDialogField, { type: 'number' }>) {
+  return field.min ?? field.defaultValue ?? 0;
 }
 
 function getConditionFieldValue(
@@ -146,7 +151,7 @@ export function validateDialogFormValues(
         errors[field.name] = validationMessages.numberMax(field.max);
         continue;
       }
-      if (field.step !== undefined && !matchesNumberStep(numberValue, field.step, field.min ?? 0)) {
+      if (field.step !== undefined && !matchesNumberStep(numberValue, field.step, getNumberStepBase(field))) {
         errors[field.name] = validationMessages.numberStep(field.step);
       }
       continue;
@@ -332,6 +337,29 @@ export function ScriptDialogFormFields({
   );
 }
 
+export function ScriptDialogFormBody({
+  form,
+  formValues,
+  formErrors,
+  onValueChange,
+}: {
+  form: ScriptDialogForm;
+  formValues: FormValues;
+  formErrors?: FormErrors;
+  onValueChange: (name: string, value: ScriptDialogFormValue) => void;
+}) {
+  return (
+    <ScrollArea className="min-h-0 pr-3">
+      <ScriptDialogFormFields
+        form={form}
+        formValues={formValues}
+        formErrors={formErrors}
+        onValueChange={onValueChange}
+      />
+    </ScrollArea>
+  );
+}
+
 export function ScriptDialogHost() {
   const { t } = useI18n();
   const [request, setRequest] = useState<ScriptDialogRequest | null>(null);
@@ -396,7 +424,7 @@ export function ScriptDialogHost() {
       }
     }}
     >
-      <DialogContent>
+      <DialogContent className={form ? 'max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden' : undefined}>
         <DialogHeader>
           <DialogTitle>{dialogTitle}</DialogTitle>
           {message ? <DialogDescription>{message}</DialogDescription> : null}
@@ -409,7 +437,7 @@ export function ScriptDialogHost() {
           />
         ) : null}
         {form ? (
-          <ScriptDialogFormFields
+          <ScriptDialogFormBody
             form={form}
             formValues={formValues}
             formErrors={formErrors}
