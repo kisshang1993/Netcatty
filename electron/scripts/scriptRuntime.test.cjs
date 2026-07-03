@@ -2,7 +2,12 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createScriptRuntime, wrapScriptSource, interruptibleSleep } = require("./scriptRuntime.cjs");
+const {
+  createScriptRuntime,
+  wrapScriptSource,
+  interruptibleSleep,
+  normalizeDialogFormSpec,
+} = require("./scriptRuntime.cjs");
 const { SessionOutputBuffer } = require("./sessionOutputBuffer.cjs");
 
 test("wrapScriptSource wraps async main scripts in async IIFE", () => {
@@ -177,4 +182,156 @@ test("createScriptRuntime supports explicit determinate progress API", async () 
   assert.ok(afterDone);
   assert.equal(afterDone.progressCurrent, undefined);
   assert.equal(afterDone.progressTotal, undefined);
+});
+
+test("normalizeDialogFormSpec normalizes fields and default choice values", () => {
+  const form = normalizeDialogFormSpec({
+    title: "Deploy",
+    message: "Choose options",
+    fields: [
+      {
+        type: "select",
+        name: "env",
+        label: "Environment",
+        options: [
+          { label: "Prod", value: "prod", disabled: true },
+          "dev",
+        ],
+        defaultValue: "prod",
+      },
+      {
+        type: "checkbox",
+        name: "restart",
+        label: "Restart",
+        defaultValue: 1,
+      },
+      {
+        type: "radio",
+        name: "mode",
+        label: "Mode",
+        options: [{ label: "Safe", value: "safe", description: "Recommended" }],
+      },
+    ],
+  });
+
+  assert.equal(form.title, "Deploy");
+  assert.equal(form.message, "Choose options");
+  assert.equal(form.fields[0].defaultValue, "dev");
+  assert.deepEqual(form.fields[0].options[1], {
+    label: "dev",
+    value: "dev",
+    description: undefined,
+    disabled: false,
+  });
+  assert.equal(form.fields[1].defaultValue, true);
+  assert.equal(form.fields[2].defaultValue, "safe");
+});
+
+test("normalizeDialogFormSpec rejects invalid fields", () => {
+  assert.throws(
+    () => normalizeDialogFormSpec({ fields: [{ type: "checkbox", name: "", label: "Missing name" }] }),
+    /field name is required/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [
+        { type: "checkbox", name: "same", label: "One" },
+        { type: "checkbox", name: "same", label: "Two" },
+      ],
+    }),
+    /Duplicate dialog form field name: same/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({ fields: [{ type: "select", name: "env", label: "Env", options: [] }] }),
+    /requires at least one option/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [{
+        type: "radio",
+        name: "mode",
+        label: "Mode",
+        options: [{ label: "Safe", value: "safe", disabled: true }],
+      }],
+    }),
+    /requires at least one enabled option/,
+  );
+});
+
+test("createScriptRuntime exposes form dialog API through showDialog", async () => {
+  let dialogCall;
+  const runtime = createScriptRuntime({
+    sessionId: "s1",
+    runId: "r1",
+    appendLog: () => {},
+    writeToSession: () => {},
+    getOutputBuffer: () => ({
+      waitFor: async () => "ok",
+      waitForAny: async () => 0,
+      getText: () => "",
+    }),
+    getSessionMeta: () => ({ connected: true, hostname: "host", username: "user" }),
+    showDialog: async (type, message, defaultValue, extras) => {
+      dialogCall = { type, message, defaultValue, extras };
+      return { env: "prod", restart: true };
+    },
+    isPaused: () => false,
+    isAborted: () => false,
+    onStatusChange: () => {},
+  });
+
+  await runtime.execute(`
+    const values = await nct.dialog.form({
+      message: 'Deploy?',
+      fields: [
+        { type: 'select', name: 'env', label: 'Environment', options: ['dev', 'prod'], defaultValue: 'prod' },
+        { type: 'checkbox', name: 'restart', label: 'Restart', defaultValue: false },
+      ],
+    });
+    nct.log(values.env + ':' + values.restart);
+  `);
+
+  assert.equal(dialogCall.type, "form");
+  assert.equal(dialogCall.message, "Deploy?");
+  assert.equal(dialogCall.defaultValue, undefined);
+  assert.equal(dialogCall.extras.form.fields[0].defaultValue, "prod");
+});
+
+test("createScriptRuntime convenience dialog controls return single values", async () => {
+  const results = [
+    { value: "prod" },
+    { value: "safe" },
+    { value: true },
+  ];
+  const calls = [];
+  const runtime = createScriptRuntime({
+    sessionId: "s1",
+    runId: "r1",
+    appendLog: () => {},
+    writeToSession: () => {},
+    getOutputBuffer: () => ({
+      waitFor: async () => "ok",
+      waitForAny: async () => 0,
+      getText: () => "",
+    }),
+    getSessionMeta: () => ({ connected: true, hostname: "host", username: "user" }),
+    showDialog: async (type, message, _defaultValue, extras) => {
+      calls.push({ type, message, fieldType: extras.form.fields[0].type });
+      return results.shift();
+    },
+    isPaused: () => false,
+    isAborted: () => false,
+    onStatusChange: () => {},
+  });
+
+  const values = [];
+  runtime.nct.log = (message) => values.push(message);
+  await runtime.execute(`
+    nct.log(await nct.dialog.select('Environment', ['dev', 'prod'], 'dev'));
+    nct.log(await nct.dialog.radio('Mode', ['safe', 'fast'], 'safe'));
+    nct.log(String(await nct.dialog.checkbox('Restart', true)));
+  `);
+
+  assert.deepEqual(calls.map((call) => call.fieldType), ["select", "radio", "checkbox"]);
+  assert.deepEqual(values, ["prod", "safe", "true"]);
 });

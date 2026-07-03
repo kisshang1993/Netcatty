@@ -40,13 +40,51 @@ export interface ScriptScreenSnapshot {
   lines: string[];
 }
 
+export interface ScriptDialogOption {
+  label: string;
+  value: string;
+  description?: string;
+  disabled?: boolean;
+}
+
+export interface ScriptDialogFieldBase {
+  name: string;
+  label: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface ScriptDialogChoiceField extends ScriptDialogFieldBase {
+  type: 'select' | 'radio';
+  options: ScriptDialogOption[];
+  defaultValue: string;
+}
+
+export interface ScriptDialogCheckboxField extends ScriptDialogFieldBase {
+  type: 'checkbox';
+  defaultValue: boolean;
+}
+
+export type ScriptDialogField = ScriptDialogChoiceField | ScriptDialogCheckboxField;
+
+export interface ScriptDialogForm {
+  title?: string;
+  message: string;
+  submitLabel?: string;
+  cancelLabel?: string;
+  fields: ScriptDialogField[];
+}
+
+export type ScriptDialogFormValue = string | boolean;
+
 export interface ScriptDialogRequest {
   requestId: string;
-  type: 'alert' | 'confirm' | 'prompt' | 'waitForTimeout';
+  type: 'alert' | 'confirm' | 'prompt' | 'waitForTimeout' | 'form';
   message: string;
   defaultValue?: string;
   pattern?: string;
   timeoutMs?: number;
+  form?: ScriptDialogForm;
 }
 
 export interface ScriptRunParams {
