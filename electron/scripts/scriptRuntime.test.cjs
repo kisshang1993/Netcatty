@@ -211,6 +211,21 @@ test("normalizeDialogFormSpec normalizes fields and default choice values", () =
         label: "Mode",
         options: [{ label: "Safe", value: "safe", description: "Recommended" }],
       },
+      {
+        type: "textarea",
+        name: "notes",
+        label: "Notes",
+        defaultValue: 123,
+        required: false,
+      },
+      {
+        type: "number",
+        name: "retries",
+        label: "Retries",
+        defaultValue: "3",
+        min: "0",
+        step: "1",
+      },
     ],
   });
 
@@ -225,6 +240,11 @@ test("normalizeDialogFormSpec normalizes fields and default choice values", () =
   });
   assert.equal(form.fields[1].defaultValue, true);
   assert.equal(form.fields[2].defaultValue, "safe");
+  assert.equal(form.fields[3].defaultValue, "123");
+  assert.equal(form.fields[3].required, false);
+  assert.equal(form.fields[4].defaultValue, 3);
+  assert.equal(form.fields[4].min, 0);
+  assert.equal(form.fields[4].step, 1);
 });
 
 test("normalizeDialogFormSpec rejects invalid fields", () => {
@@ -255,6 +275,18 @@ test("normalizeDialogFormSpec rejects invalid fields", () => {
       }],
     }),
     /requires at least one enabled option/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [{ type: "number", name: "count", label: "Count", defaultValue: "many" }],
+    }),
+    /defaultValue must be a finite number/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [{ type: "number", name: "count", label: "Count", min: 10, max: 1 }],
+    }),
+    /min cannot be greater than max/,
   );
 });
 

@@ -50,13 +50,14 @@ Use \`waitForRegex(".*请选择SSH资源.*登录方式.*")\` for regex or output
 - \`await nct.dialog.confirm(msg)\` → boolean
 - \`await nct.dialog.prompt(msg, default?)\` → string
 - \`await nct.dialog.alert(msg)\`
-- \`await nct.dialog.form({ title?, message?, fields })\` → object; fields support \`select\`, \`checkbox\`, and \`radio\`
+- \`await nct.dialog.form({ title?, message?, fields })\` → object; fields support \`select\`, \`checkbox\`, \`radio\`, \`textarea\`, and \`number\`
 - \`await nct.dialog.select(msg, options, default?)\` → string
 - \`await nct.dialog.radio(msg, options, default?)\` → string
 - \`await nct.dialog.checkbox(msg, defaultChecked?)\` → boolean
 
 \`select\` and \`radio\` options may be strings or \`{ label, value, description?, disabled? }\`.
-\`form\` returns an object keyed by field \`name\`.
+\`textarea\` returns string values; \`number\` returns number values or \`undefined\` when optional and empty. \`number\` fields support submit-time \`min\`, \`max\`, and \`step\` validation.
+\`form\` returns an object keyed by field \`name\`. Fields are required by default; set \`required: false\` for optional text/number fields.
 
 ### nct.progress
 - \`nct.progress.start(label, total)\` — opt-in determinate bar

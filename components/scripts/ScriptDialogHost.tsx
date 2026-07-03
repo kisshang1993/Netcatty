@@ -11,6 +11,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -27,6 +28,14 @@ import type {
 } from '@/types/global/netcatty-bridge-script.d.ts';
 
 type FormValues = Record<string, ScriptDialogFormValue>;
+type FormErrors = Record<string, string>;
+type FormValidationMessages = string | {
+  required: string;
+  numberInvalid: string;
+  numberMin: (min: number) => string;
+  numberMax: (max: number) => string;
+  numberStep: (step: number) => string;
+};
 
 export function getInitialFormValues(request: ScriptDialogRequest): FormValues {
   if (request.type !== 'form' || !request.form) return {};
@@ -39,18 +48,104 @@ export function applyFormValue(values: FormValues, name: string, value: ScriptDi
   return { ...values, [name]: value };
 }
 
+function resolveValidationMessages(messages: FormValidationMessages = 'Required') {
+  if (typeof messages === 'string') {
+    return {
+      required: messages,
+      numberInvalid: messages,
+      numberMin: () => messages,
+      numberMax: () => messages,
+      numberStep: () => messages,
+    };
+  }
+  return messages;
+}
+
+function matchesNumberStep(value: number, step: number, base = 0) {
+  const quotient = (value - base) / step;
+  return Math.abs(quotient - Math.round(quotient)) < 1e-9;
+}
+
+export function validateDialogFormValues(
+  form: ScriptDialogForm,
+  values: FormValues,
+  messages: FormValidationMessages = 'Required',
+): FormErrors {
+  const validationMessages = resolveValidationMessages(messages);
+  const errors: FormErrors = {};
+  for (const field of form.fields) {
+    const value = values[field.name];
+    if (field.type === 'checkbox') continue;
+    if (field.type === 'number') {
+      const isEmpty = value === undefined || value === '';
+      if (isEmpty) {
+        if (field.required !== false) {
+          errors[field.name] = validationMessages.required;
+        }
+        continue;
+      }
+      const numberValue = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(numberValue)) {
+        errors[field.name] = validationMessages.numberInvalid;
+        continue;
+      }
+      if (field.min !== undefined && numberValue < field.min) {
+        errors[field.name] = validationMessages.numberMin(field.min);
+        continue;
+      }
+      if (field.max !== undefined && numberValue > field.max) {
+        errors[field.name] = validationMessages.numberMax(field.max);
+        continue;
+      }
+      if (field.step !== undefined && !matchesNumberStep(numberValue, field.step, field.min ?? 0)) {
+        errors[field.name] = validationMessages.numberStep(field.step);
+      }
+      continue;
+    }
+    if (field.required === false) continue;
+    if (value === undefined || String(value).trim() === '') {
+      errors[field.name] = validationMessages.required;
+    }
+  }
+  return errors;
+}
+
+export function normalizeDialogFormSubmitValues(form: ScriptDialogForm, values: FormValues): FormValues {
+  const next: FormValues = {};
+  for (const field of form.fields) {
+    const value = values[field.name];
+    if (field.type === 'number') {
+      if (value === undefined || value === '') {
+        next[field.name] = undefined;
+        continue;
+      }
+      const numberValue = typeof value === 'number' ? value : Number(value);
+      next[field.name] = Number.isFinite(numberValue) ? numberValue : undefined;
+      continue;
+    }
+    next[field.name] = value;
+  }
+  return next;
+}
+
 export function ScriptDialogFormFields({
   form,
   formValues,
+  formErrors = {},
   onValueChange,
 }: {
   form: ScriptDialogForm;
   formValues: FormValues;
+  formErrors?: FormErrors;
   onValueChange: (name: string, value: ScriptDialogFormValue) => void;
 }) {
   const renderFormField = (field: ScriptDialogField) => {
+    const fieldError = formErrors[field.name];
     const fieldDescription = field.description ? (
       <p className="text-xs text-muted-foreground">{field.description}</p>
+    ) : null;
+    const errorMessage = fieldError ? (
+      <p className="text-xs text-destructive">{fieldError}</p>
     ) : null;
 
     if (field.type === 'select') {
@@ -73,6 +168,7 @@ export function ScriptDialogFormFields({
             </SelectContent>
           </Select>
           {fieldDescription}
+          {errorMessage}
         </div>
       );
     }
@@ -112,7 +208,46 @@ export function ScriptDialogFormFields({
               );
             })}
           </div>
+          {errorMessage}
         </fieldset>
+      );
+    }
+
+    if (field.type === 'textarea') {
+      return (
+        <div key={field.name} className="space-y-2">
+          <Label htmlFor={`script-dialog-${field.name}`}>{field.label}</Label>
+          <Textarea
+            id={`script-dialog-${field.name}`}
+            value={String(formValues[field.name] ?? field.defaultValue)}
+            placeholder={field.placeholder}
+            onChange={(event) => onValueChange(field.name, event.target.value)}
+            aria-invalid={fieldError ? true : undefined}
+          />
+          {fieldDescription}
+          {errorMessage}
+        </div>
+      );
+    }
+
+    if (field.type === 'number') {
+      return (
+        <div key={field.name} className="space-y-2">
+          <Label htmlFor={`script-dialog-${field.name}`}>{field.label}</Label>
+          <Input
+            id={`script-dialog-${field.name}`}
+            type="number"
+            value={formValues[field.name] ?? field.defaultValue ?? ''}
+            placeholder={field.placeholder}
+            min={field.min}
+            max={field.max}
+            step={field.step}
+            onChange={(event) => onValueChange(field.name, event.target.value)}
+            aria-invalid={fieldError ? true : undefined}
+          />
+          {fieldDescription}
+          {errorMessage}
+        </div>
       );
     }
 
@@ -132,6 +267,9 @@ export function ScriptDialogFormFields({
             {field.description ? (
               <span className="mt-1 block text-xs text-muted-foreground">{field.description}</span>
             ) : null}
+            {fieldError ? (
+              <span className="mt-1 block text-xs text-destructive">{fieldError}</span>
+            ) : null}
           </span>
         </label>
       </div>
@@ -150,12 +288,14 @@ export function ScriptDialogHost() {
   const [request, setRequest] = useState<ScriptDialogRequest | null>(null);
   const [promptValue, setPromptValue] = useState('');
   const [formValues, setFormValues] = useState<FormValues>({});
+  const [formErrors, setFormErrors] = useState<FormErrors>({});
 
   useEffect(() => {
     const dispose = netcattyBridge.get()?.onScriptDialogRequest?.((payload) => {
       setRequest(payload);
       setPromptValue(payload.defaultValue ?? '');
       setFormValues(getInitialFormValues(payload));
+      setFormErrors({});
     });
     return dispose;
   }, []);
@@ -176,6 +316,28 @@ export function ScriptDialogHost() {
 
   const setFormValue = (name: string, value: ScriptDialogFormValue) => {
     setFormValues((current) => applyFormValue(current, name, value));
+    setFormErrors((current) => {
+      if (!current[name]) return current;
+      const { [name]: _removed, ...rest } = current;
+      return rest;
+    });
+  };
+
+  const submitForm = () => {
+    if (!form) return;
+    const errors = validateDialogFormValues(form, formValues, {
+      required: t('scripts.dialog.required'),
+      numberInvalid: t('scripts.dialog.numberInvalid'),
+      numberMin: (min) => t('scripts.dialog.numberMin', { min }),
+      numberMax: (max) => t('scripts.dialog.numberMax', { max }),
+      numberStep: (step) => t('scripts.dialog.numberStep', { step }),
+    });
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors);
+      return;
+    }
+    const submitValues = normalizeDialogFormSubmitValues(form, formValues);
+    void respond(submitValues);
   };
 
   return (
@@ -201,6 +363,7 @@ export function ScriptDialogHost() {
           <ScriptDialogFormFields
             form={form}
             formValues={formValues}
+            formErrors={formErrors}
             onValueChange={setFormValue}
           />
         ) : null}
@@ -232,7 +395,7 @@ export function ScriptDialogHost() {
               <Button variant="outline" onClick={() => void respond(undefined, true)}>
                 {form?.cancelLabel || t('common.cancel')}
               </Button>
-              <Button onClick={() => void respond(formValues)}>
+              <Button onClick={submitForm}>
                 {form?.submitLabel || t('scripts.dialog.ok')}
               </Button>
             </>

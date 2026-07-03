@@ -76,7 +76,7 @@ function normalizeDialogField(field, seenNames) {
     throw new Error("Dialog form field must be an object");
   }
   const type = String(field.type ?? "");
-  if (!["select", "checkbox", "radio"].includes(type)) {
+  if (!["select", "checkbox", "radio", "textarea", "number"].includes(type)) {
     throw new Error(`Unsupported dialog field type: ${type || "unknown"}`);
   }
   const name = String(field.name ?? "").trim();
@@ -100,6 +100,46 @@ function normalizeDialogField(field, seenNames) {
     return {
       ...base,
       defaultValue: Boolean(field.defaultValue),
+    };
+  }
+
+  if (type === "textarea") {
+    return {
+      ...base,
+      placeholder: field.placeholder == null ? undefined : String(field.placeholder),
+      defaultValue: field.defaultValue == null ? "" : String(field.defaultValue),
+    };
+  }
+
+  if (type === "number") {
+    const defaultNumber = field.defaultValue === undefined || field.defaultValue === null || field.defaultValue === ""
+      ? undefined
+      : Number(field.defaultValue);
+    if (defaultNumber !== undefined && !Number.isFinite(defaultNumber)) {
+      throw new Error(`Dialog number field defaultValue must be a finite number: ${name}`);
+    }
+    const min = field.min === undefined || field.min === null || field.min === "" ? undefined : Number(field.min);
+    const max = field.max === undefined || field.max === null || field.max === "" ? undefined : Number(field.max);
+    const step = field.step === undefined || field.step === null || field.step === "" ? undefined : Number(field.step);
+    if (min !== undefined && !Number.isFinite(min)) {
+      throw new Error(`Dialog number field min must be a finite number: ${name}`);
+    }
+    if (max !== undefined && !Number.isFinite(max)) {
+      throw new Error(`Dialog number field max must be a finite number: ${name}`);
+    }
+    if (step !== undefined && (!Number.isFinite(step) || step <= 0)) {
+      throw new Error(`Dialog number field step must be a positive finite number: ${name}`);
+    }
+    if (min !== undefined && max !== undefined && min > max) {
+      throw new Error(`Dialog number field min cannot be greater than max: ${name}`);
+    }
+    return {
+      ...base,
+      placeholder: field.placeholder == null ? undefined : String(field.placeholder),
+      defaultValue: defaultNumber,
+      min,
+      max,
+      step,
     };
   }
 

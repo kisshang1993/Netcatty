@@ -65,7 +65,26 @@ export interface ScriptDialogCheckboxField extends ScriptDialogFieldBase {
   defaultValue: boolean;
 }
 
-export type ScriptDialogField = ScriptDialogChoiceField | ScriptDialogCheckboxField;
+export interface ScriptDialogTextareaField extends ScriptDialogFieldBase {
+  type: 'textarea';
+  defaultValue: string;
+  placeholder?: string;
+}
+
+export interface ScriptDialogNumberField extends ScriptDialogFieldBase {
+  type: 'number';
+  defaultValue?: number;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+export type ScriptDialogField =
+  | ScriptDialogChoiceField
+  | ScriptDialogCheckboxField
+  | ScriptDialogTextareaField
+  | ScriptDialogNumberField;
 
 export interface ScriptDialogForm {
   title?: string;
@@ -75,7 +94,7 @@ export interface ScriptDialogForm {
   fields: ScriptDialogField[];
 }
 
-export type ScriptDialogFormValue = string | boolean;
+export type ScriptDialogFormValue = string | boolean | number | undefined;
 
 export interface ScriptDialogRequest {
   requestId: string;
