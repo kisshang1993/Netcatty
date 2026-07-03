@@ -99,7 +99,58 @@ nct.log(`optionalNote=${values.optionalNote ?? ''}`);
 await nct.dialog.alert('Required validation passed.');
 ```
 
-## 3. Convenience Controls
+## 3. Conditional Display
+
+Tests `visibleWhen`. Select `local` first: the remote fields should be hidden and omitted from the returned object. Select `remote`: the host field appears and becomes required because it is visible.
+
+```javascript
+const values = await nct.dialog.form({
+  title: 'Conditional display',
+  message: 'Switch the target type and watch the visible fields change.',
+  fields: [
+    {
+      type: 'select',
+      name: 'target',
+      label: 'Target',
+      options: [
+        { label: 'Local machine', value: 'local' },
+        { label: 'Remote host', value: 'remote' },
+      ],
+      defaultValue: 'local',
+    },
+    {
+      type: 'textarea',
+      name: 'host',
+      label: 'Remote host',
+      placeholder: 'example.com',
+      defaultValue: '',
+      visibleWhen: { field: 'target', equals: 'remote' },
+    },
+    {
+      type: 'number',
+      name: 'sshPort',
+      label: 'SSH port',
+      defaultValue: 22,
+      min: 1,
+      max: 65535,
+      step: 1,
+      visibleWhen: { field: 'target', equals: 'remote' },
+    },
+    {
+      type: 'checkbox',
+      name: 'confirmRemote',
+      label: 'I know this will target a remote host',
+      defaultValue: false,
+      visibleWhen: { field: 'target', equals: 'remote' },
+    },
+  ],
+});
+
+nct.log(JSON.stringify(values, null, 2));
+await nct.dialog.alert(`Visible values only:\n${JSON.stringify(values, null, 2)}`);
+```
+
+## 4. Convenience Controls
 
 Tests `select`, `radio`, and `checkbox` helper APIs.
 
@@ -128,7 +179,7 @@ nct.log(`env=${env}, mode=${mode}, verbose=${verbose}`);
 await nct.dialog.alert(`env=${env}\nmode=${mode}\nverbose=${verbose}`);
 ```
 
-## 4. Safe Real Command Test
+## 5. Safe Real Command Test
 
 Uses form values to run a harmless command in the current terminal.
 
@@ -177,4 +228,3 @@ await nct.screen.sendLine(values.command);
 await nct.screen.waitForPrompt(30000);
 await nct.dialog.alert(`Command finished: ${values.command}`);
 ```
-

@@ -225,6 +225,7 @@ test("normalizeDialogFormSpec normalizes fields and default choice values", () =
         defaultValue: "3",
         min: "0",
         step: "1",
+        visibleWhen: { field: "restart", equals: true },
       },
     ],
   });
@@ -245,6 +246,7 @@ test("normalizeDialogFormSpec normalizes fields and default choice values", () =
   assert.equal(form.fields[4].defaultValue, 3);
   assert.equal(form.fields[4].min, 0);
   assert.equal(form.fields[4].step, 1);
+  assert.deepEqual(form.fields[4].visibleWhen, { field: "restart", equals: true });
 });
 
 test("normalizeDialogFormSpec rejects invalid fields", () => {
@@ -287,6 +289,24 @@ test("normalizeDialogFormSpec rejects invalid fields", () => {
       fields: [{ type: "number", name: "count", label: "Count", min: 10, max: 1 }],
     }),
     /min cannot be greater than max/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [
+        { type: "select", name: "target", label: "Target", options: ["local", "remote"] },
+        { type: "textarea", name: "host", label: "Host", visibleWhen: { field: "missing", equals: "remote" } },
+      ],
+    }),
+    /visibleWhen references unknown field: missing/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({
+      fields: [
+        { type: "select", name: "target", label: "Target", options: ["local", "remote"] },
+        { type: "textarea", name: "host", label: "Host", visibleWhen: { field: "target", equals: "remote", truthy: true } },
+      ],
+    }),
+    /requires exactly one condition operator/,
   );
 });
 

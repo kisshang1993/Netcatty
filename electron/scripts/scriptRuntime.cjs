@@ -71,6 +71,46 @@ function normalizeChoiceOptions(fieldType, options, defaultValue) {
   };
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeConditionValue(value, context) {
+  const valueType = typeof value;
+  if (valueType === "string" || valueType === "boolean") {
+    return value;
+  }
+  if (valueType === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  throw new Error(`${context} must be a string, number, or boolean`);
+}
+
+function normalizeDialogCondition(condition, context = "Dialog visibleWhen") {
+  if (!condition || typeof condition !== "object" || Array.isArray(condition)) {
+    throw new Error(`${context} must be an object`);
+  }
+  const field = String(condition.field ?? "").trim();
+  if (!field) {
+    throw new Error(`${context} field is required`);
+  }
+  const operators = ["equals", "notEquals", "truthy", "falsy"].filter((operator) => hasOwn(condition, operator));
+  if (operators.length !== 1) {
+    throw new Error(`${context} requires exactly one condition operator`);
+  }
+  const operator = operators[0];
+  if (operator === "truthy" || operator === "falsy") {
+    if (condition[operator] !== true) {
+      throw new Error(`${context} ${operator} must be true`);
+    }
+    return { field, [operator]: true };
+  }
+  return {
+    field,
+    [operator]: normalizeConditionValue(condition[operator], `${context} ${operator}`),
+  };
+}
+
 function normalizeDialogField(field, seenNames) {
   if (!field || typeof field !== "object") {
     throw new Error("Dialog form field must be an object");
@@ -94,6 +134,7 @@ function normalizeDialogField(field, seenNames) {
     label: String(field.label ?? name),
     description: field.description == null ? undefined : String(field.description),
     required: field.required !== false,
+    visibleWhen: field.visibleWhen == null ? undefined : normalizeDialogCondition(field.visibleWhen),
   };
 
   if (type === "checkbox") {
@@ -159,12 +200,18 @@ function normalizeDialogFormSpec(spec) {
     throw new Error("Dialog form requires at least one field");
   }
   const seenNames = new Set();
+  const fields = spec.fields.map((field) => normalizeDialogField(field, seenNames));
+  for (const field of fields) {
+    if (field.visibleWhen && !seenNames.has(field.visibleWhen.field)) {
+      throw new Error(`Dialog visibleWhen references unknown field: ${field.visibleWhen.field}`);
+    }
+  }
   return {
     title: spec.title == null ? undefined : String(spec.title),
     message: spec.message == null ? "" : String(spec.message),
     submitLabel: spec.submitLabel == null ? undefined : String(spec.submitLabel),
     cancelLabel: spec.cancelLabel == null ? undefined : String(spec.cancelLabel),
-    fields: spec.fields.map((field) => normalizeDialogField(field, seenNames)),
+    fields,
   };
 }
 

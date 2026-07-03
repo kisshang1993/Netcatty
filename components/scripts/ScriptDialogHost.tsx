@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/select';
 import { netcattyBridge } from '@/infrastructure/services/netcattyBridge.ts';
 import type {
+  ScriptDialogCondition,
   ScriptDialogField,
   ScriptDialogForm,
   ScriptDialogFormValue,
@@ -66,6 +67,54 @@ function matchesNumberStep(value: number, step: number, base = 0) {
   return Math.abs(quotient - Math.round(quotient)) < 1e-9;
 }
 
+function getConditionFieldValue(
+  form: ScriptDialogForm,
+  values: FormValues,
+  fieldName: string,
+): ScriptDialogFormValue {
+  const field = form.fields.find((candidate) => candidate.name === fieldName);
+  const value = values[fieldName];
+  if (field?.type === 'number') {
+    if (value === undefined || value === '') return undefined;
+    const numberValue = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(numberValue) ? numberValue : value;
+  }
+  if (field?.type === 'checkbox') {
+    return Boolean(value);
+  }
+  return value;
+}
+
+export function evaluateDialogCondition(
+  form: ScriptDialogForm,
+  values: FormValues,
+  condition: ScriptDialogCondition,
+): boolean {
+  const value = getConditionFieldValue(form, values, condition.field);
+  if ('equals' in condition) {
+    return value === condition.equals;
+  }
+  if ('notEquals' in condition) {
+    return value !== condition.notEquals;
+  }
+  if ('truthy' in condition) {
+    return Boolean(value);
+  }
+  return !value;
+}
+
+export function isDialogFieldVisible(
+  form: ScriptDialogForm,
+  field: ScriptDialogField,
+  values: FormValues,
+): boolean {
+  return field.visibleWhen ? evaluateDialogCondition(form, values, field.visibleWhen) : true;
+}
+
+export function getVisibleDialogFormFields(form: ScriptDialogForm, values: FormValues): ScriptDialogField[] {
+  return form.fields.filter((field) => isDialogFieldVisible(form, field, values));
+}
+
 export function validateDialogFormValues(
   form: ScriptDialogForm,
   values: FormValues,
@@ -73,7 +122,7 @@ export function validateDialogFormValues(
 ): FormErrors {
   const validationMessages = resolveValidationMessages(messages);
   const errors: FormErrors = {};
-  for (const field of form.fields) {
+  for (const field of getVisibleDialogFormFields(form, values)) {
     const value = values[field.name];
     if (field.type === 'checkbox') continue;
     if (field.type === 'number') {
@@ -112,7 +161,7 @@ export function validateDialogFormValues(
 
 export function normalizeDialogFormSubmitValues(form: ScriptDialogForm, values: FormValues): FormValues {
   const next: FormValues = {};
-  for (const field of form.fields) {
+  for (const field of getVisibleDialogFormFields(form, values)) {
     const value = values[field.name];
     if (field.type === 'number') {
       if (value === undefined || value === '') {
@@ -278,7 +327,7 @@ export function ScriptDialogFormFields({
 
   return (
     <div className="space-y-4">
-      {form.fields.map(renderFormField)}
+      {getVisibleDialogFormFields(form, formValues).map(renderFormField)}
     </div>
   );
 }

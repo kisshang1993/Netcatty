@@ -47,11 +47,20 @@ export interface ScriptDialogOption {
   disabled?: boolean;
 }
 
+export type ScriptDialogConditionValue = string | number | boolean;
+
+export type ScriptDialogCondition =
+  | { field: string; equals: ScriptDialogConditionValue }
+  | { field: string; notEquals: ScriptDialogConditionValue }
+  | { field: string; truthy: true }
+  | { field: string; falsy: true };
+
 export interface ScriptDialogFieldBase {
   name: string;
   label: string;
   description?: string;
   required?: boolean;
+  visibleWhen?: ScriptDialogCondition;
 }
 
 export interface ScriptDialogChoiceField extends ScriptDialogFieldBase {

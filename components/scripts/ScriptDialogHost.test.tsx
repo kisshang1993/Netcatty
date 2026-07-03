@@ -7,6 +7,7 @@ import type { ScriptDialogRequest } from "../../types/global/netcatty-bridge-scr
 import {
   applyFormValue,
   getInitialFormValues,
+  getVisibleDialogFormFields,
   normalizeDialogFormSubmitValues,
   ScriptDialogFormFields,
   validateDialogFormValues,
@@ -150,6 +151,71 @@ test("script dialog form validates number min max and step before submit", () =>
   assert.deepEqual(validateDialogFormValues(form, { delayMs: 5000 }, messages), {});
 });
 
+test("script dialog form applies visibleWhen to rendering validation and submit payload", () => {
+  const conditionalRequest: ScriptDialogRequest = {
+    ...formRequest,
+    form: {
+      ...formRequest.form!,
+      fields: [
+        {
+          type: "select",
+          name: "target",
+          label: "Target",
+          options: [
+            { label: "Local", value: "local" },
+            { label: "Remote", value: "remote" },
+          ],
+          defaultValue: "local",
+        },
+        {
+          type: "textarea",
+          name: "host",
+          label: "Remote host",
+          defaultValue: "",
+          visibleWhen: { field: "target", equals: "remote" },
+        },
+        {
+          type: "checkbox",
+          name: "confirmRemote",
+          label: "Confirm remote",
+          defaultValue: false,
+          visibleWhen: { field: "target", notEquals: "local" },
+        },
+        {
+          type: "textarea",
+          name: "localNote",
+          label: "Local note",
+          defaultValue: "local only",
+          required: false,
+          visibleWhen: { field: "confirmRemote", falsy: true },
+        },
+      ],
+    },
+  };
+  const localValues = getInitialFormValues(conditionalRequest);
+  const localVisibleNames = getVisibleDialogFormFields(conditionalRequest.form!, localValues).map((field) => field.name);
+
+  assert.deepEqual(localVisibleNames, ["target", "localNote"]);
+  assert.deepEqual(validateDialogFormValues(conditionalRequest.form!, localValues, "Required"), {});
+  assert.deepEqual(normalizeDialogFormSubmitValues(conditionalRequest.form!, localValues), {
+    target: "local",
+    localNote: "local only",
+  });
+
+  const remoteValues = applyFormValue(applyFormValue(localValues, "target", "remote"), "confirmRemote", true);
+  const remoteVisibleNames = getVisibleDialogFormFields(conditionalRequest.form!, remoteValues).map((field) => field.name);
+
+  assert.deepEqual(remoteVisibleNames, ["target", "host", "confirmRemote"]);
+  assert.deepEqual(validateDialogFormValues(conditionalRequest.form!, remoteValues, "Required"), {
+    host: "Required",
+  });
+  assert.deepEqual(normalizeDialogFormSubmitValues(conditionalRequest.form!, applyFormValue(remoteValues, "host", "example.com")), {
+    target: "remote",
+    host: "example.com",
+    confirmRemote: true,
+  });
+});
+
 test("script dialog form fields render select checkbox radio textarea and number controls", () => {
   const values = getInitialFormValues(formRequest);
   const markup = renderToStaticMarkup(
@@ -167,6 +233,45 @@ test("script dialog form fields render select checkbox radio textarea and number
   assert.match(markup, /type="radio"[^>]*value="fast"/);
   assert.match(markup, /<textarea[^>]*>initial note<\/textarea>/);
   assert.match(markup, /type="number"[^>]*min="0"[^>]*step="1"[^>]*value="3"/);
+});
+
+test("script dialog form fields do not render hidden visibleWhen controls", () => {
+  const request: ScriptDialogRequest = {
+    ...formRequest,
+    form: {
+      ...formRequest.form!,
+      fields: [
+        {
+          type: "select",
+          name: "target",
+          label: "Target",
+          options: [
+            { label: "Local", value: "local" },
+            { label: "Remote", value: "remote" },
+          ],
+          defaultValue: "local",
+        },
+        {
+          type: "textarea",
+          name: "host",
+          label: "Remote host",
+          defaultValue: "",
+          visibleWhen: { field: "target", equals: "remote" },
+        },
+      ],
+    },
+  };
+
+  const markup = renderToStaticMarkup(
+    <ScriptDialogFormFields
+      form={request.form!}
+      formValues={getInitialFormValues(request)}
+      onValueChange={() => {}}
+    />,
+  );
+
+  assert.match(markup, /Target/);
+  assert.doesNotMatch(markup, /Remote host/);
 });
 
 test("script dialog form fields render required errors", () => {
