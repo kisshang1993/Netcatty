@@ -240,6 +240,7 @@ test("normalizeDialogFormSpec normalizes fields and default choice values", () =
     disabled: false,
   });
   assert.equal(form.fields[1].defaultValue, true);
+  assert.equal(form.fields[1].required, false);
   assert.equal(form.fields[2].defaultValue, "safe");
   assert.equal(form.fields[3].defaultValue, "123");
   assert.equal(form.fields[3].required, false);
@@ -264,8 +265,20 @@ test("normalizeDialogFormSpec rejects invalid fields", () => {
     /Duplicate dialog form field name: same/,
   );
   assert.throws(
+    () => normalizeDialogFormSpec({ fields: [{ type: "checkbox", name: "__proto__", label: "Reserved" }] }),
+    /field name is reserved: __proto__/,
+  );
+  assert.throws(
     () => normalizeDialogFormSpec({ fields: [{ type: "select", name: "env", label: "Env", options: [] }] }),
     /requires at least one option/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({ fields: [{ type: "select", name: "env", label: "Env", options: [""] }] }),
+    /option value is required/,
+  );
+  assert.throws(
+    () => normalizeDialogFormSpec({ fields: [{ type: "select", name: "env", label: "Env", options: ["dev", { label: "Dev again", value: "dev" }] }] }),
+    /option values must be unique: dev/,
   );
   assert.throws(
     () => normalizeDialogFormSpec({

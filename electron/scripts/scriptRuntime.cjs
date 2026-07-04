@@ -32,6 +32,9 @@ function truncateActivityLabel(value, max = 80) {
 
 function normalizeDialogOption(option) {
   if (typeof option === "string") {
+    if (!option) {
+      throw new Error("Dialog option value is required");
+    }
     return {
       label: option,
       value: option,
@@ -59,6 +62,13 @@ function normalizeChoiceOptions(fieldType, options, defaultValue) {
     throw new Error(`Dialog ${fieldType} field requires at least one option`);
   }
   const normalizedOptions = options.map(normalizeDialogOption);
+  const seenValues = new Set();
+  for (const option of normalizedOptions) {
+    if (seenValues.has(option.value)) {
+      throw new Error(`Dialog ${fieldType} field option values must be unique: ${option.value}`);
+    }
+    seenValues.add(option.value);
+  }
   const firstEnabled = normalizedOptions.find((option) => !option.disabled);
   if (!firstEnabled) {
     throw new Error(`Dialog ${fieldType} field requires at least one enabled option`);
@@ -128,6 +138,9 @@ function normalizeDialogField(field, seenNames) {
   if (!name) {
     throw new Error("Dialog form field name is required");
   }
+  if (["__proto__", "prototype", "constructor"].includes(name)) {
+    throw new Error(`Dialog form field name is reserved: ${name}`);
+  }
   if (seenNames.has(name)) {
     throw new Error(`Duplicate dialog form field name: ${name}`);
   }
@@ -145,6 +158,7 @@ function normalizeDialogField(field, seenNames) {
   if (type === "checkbox") {
     return {
       ...base,
+      required: field.required === true,
       defaultValue: Boolean(field.defaultValue),
     };
   }

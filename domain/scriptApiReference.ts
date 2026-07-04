@@ -55,10 +55,10 @@ Use \`waitForRegex(".*请选择SSH资源.*登录方式.*")\` for regex or output
 - \`await nct.dialog.radio(msg, options, default?)\` → string
 - \`await nct.dialog.checkbox(msg, defaultChecked?)\` → boolean
 
-\`select\` and \`radio\` options may be strings or \`{ label, value, description?, disabled? }\`.
+\`select\` and \`radio\` options may be strings or \`{ label, value, description?, disabled? }\`; option values must be non-empty and unique within the field.
 \`textarea\` returns string values; \`number\` returns number values or \`undefined\` when optional and empty. \`number\` fields support submit-time \`min\`, \`max\`, and \`step\` validation.
 Fields may use \`visibleWhen: { field, equals|notEquals|truthy|falsy }\` for conditional display; \`visibleWhen.field\` must reference an earlier field. Hidden fields are not validated and are omitted from the submitted object.
-\`form\` returns an object keyed by visible field \`name\`. Fields are required by default; set \`required: false\` for optional text/number fields.
+\`form\` returns an object keyed by visible field \`name\`. Field names must not be \`__proto__\`, \`prototype\`, or \`constructor\`. Text, number, select, and radio fields are required/defaulted by default; checkbox fields are optional boolean fields unless \`required: true\` is set.
 
 ### nct.progress
 - \`nct.progress.start(label, total)\` — opt-in determinate bar

@@ -50,6 +50,10 @@ export function applyFormValue(values: FormValues, name: string, value: ScriptDi
   return { ...values, [name]: value };
 }
 
+export function getDialogFieldDomId(name: string): string {
+  return `script-dialog-${encodeURIComponent(name || 'field')}`;
+}
+
 function resolveValidationMessages(messages: FormValidationMessages = 'Required') {
   if (typeof messages === 'string') {
     return {
@@ -145,7 +149,12 @@ export function validateDialogFormValues(
   const errors: FormErrors = {};
   for (const field of getVisibleDialogFormFields(form, values)) {
     const value = values[field.name];
-    if (field.type === 'checkbox') continue;
+    if (field.type === 'checkbox') {
+      if (field.required === true && !value) {
+        errors[field.name] = validationMessages.required;
+      }
+      continue;
+    }
     if (field.type === 'number') {
       const isEmpty = value === undefined || value === '';
       if (isEmpty) {
@@ -210,33 +219,67 @@ export function ScriptDialogFormFields({
   onValueChange: (name: string, value: ScriptDialogFormValue) => void;
 }) {
   const renderFormField = (field: ScriptDialogField) => {
+    const inputId = getDialogFieldDomId(field.name);
     const fieldError = formErrors[field.name];
+    const descriptionId = field.description ? `${inputId}-description` : undefined;
+    const errorId = fieldError ? `${inputId}-error` : undefined;
+    const describedBy = [descriptionId, errorId].filter(Boolean).join(' ') || undefined;
     const fieldDescription = field.description ? (
-      <p className="text-xs text-muted-foreground">{field.description}</p>
+      <p id={descriptionId} className="text-xs text-muted-foreground">{field.description}</p>
+    ) : null;
+    const inlineDescription = field.description ? (
+      <span id={descriptionId} className="mt-1 block text-xs text-muted-foreground">{field.description}</span>
     ) : null;
     const errorMessage = fieldError ? (
-      <p className="text-xs text-destructive">{fieldError}</p>
+      <p id={errorId} className="text-xs text-destructive">{fieldError}</p>
+    ) : null;
+    const inlineErrorMessage = fieldError ? (
+      <span id={errorId} className="mt-1 block text-xs text-destructive">{fieldError}</span>
     ) : null;
 
     if (field.type === 'select') {
+      const labelId = `${inputId}-label`;
+      const selectedValue = String(formValues[field.name] ?? field.defaultValue);
+      const selectedOption = field.options.find((option) => option.value === selectedValue);
+      const selectedDescriptionId = selectedOption?.description ? `${inputId}-selected-description` : undefined;
+      const selectDescribedBy = [describedBy, selectedDescriptionId].filter(Boolean).join(' ') || undefined;
       return (
         <div key={field.name} className="space-y-2">
-          <Label>{field.label}</Label>
+          <Label id={labelId} htmlFor={inputId}>{field.label}</Label>
           <Select
-            value={String(formValues[field.name] ?? field.defaultValue)}
+            value={selectedValue}
             onValueChange={(value) => onValueChange(field.name, value)}
           >
-            <SelectTrigger className="w-full">
+            <SelectTrigger
+              id={inputId}
+              aria-labelledby={labelId}
+              aria-describedby={selectDescribedBy}
+              aria-invalid={fieldError ? true : undefined}
+              className="w-full"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {field.options.map((option) => (
-                <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
-                  {option.label}
+                <SelectItem
+                  key={option.value}
+                  value={option.value}
+                  disabled={option.disabled}
+                  textValue={option.label}
+                >
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate">{option.label}</span>
+                    {option.description ? (
+                      <span className="truncate text-xs text-muted-foreground">{option.description}</span>
+                    ) : null}
+                  </span>
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
+          {selectedOption?.description ? (
+            <p id={selectedDescriptionId} className="text-xs text-muted-foreground">{selectedOption.description}</p>
+          ) : null}
           {fieldDescription}
           {errorMessage}
         </div>
@@ -246,22 +289,27 @@ export function ScriptDialogFormFields({
     if (field.type === 'radio') {
       const selectedValue = String(formValues[field.name] ?? field.defaultValue);
       return (
-        <fieldset key={field.name} className="space-y-2">
+        <fieldset
+          key={field.name}
+          className="space-y-2"
+          aria-describedby={describedBy}
+          aria-invalid={fieldError ? true : undefined}
+        >
           <legend className="text-sm font-medium leading-none">{field.label}</legend>
           {fieldDescription}
           <div className="space-y-2">
             {field.options.map((option, index) => {
-              const inputId = `script-dialog-${field.name}-${index}`;
+              const optionInputId = `${inputId}-${index}`;
               return (
                 <label
                   key={option.value}
-                  htmlFor={inputId}
+                  htmlFor={optionInputId}
                   className="flex items-start gap-2 rounded-md border border-border/60 px-3 py-2 text-sm"
                 >
                   <input
-                    id={inputId}
+                    id={optionInputId}
                     type="radio"
-                    name={`script-dialog-${field.name}`}
+                    name={inputId}
                     value={option.value}
                     checked={selectedValue === option.value}
                     disabled={option.disabled}
@@ -286,12 +334,13 @@ export function ScriptDialogFormFields({
     if (field.type === 'textarea') {
       return (
         <div key={field.name} className="space-y-2">
-          <Label htmlFor={`script-dialog-${field.name}`}>{field.label}</Label>
+          <Label htmlFor={inputId}>{field.label}</Label>
           <Textarea
-            id={`script-dialog-${field.name}`}
+            id={inputId}
             value={String(formValues[field.name] ?? field.defaultValue)}
             placeholder={field.placeholder}
             onChange={(event) => onValueChange(field.name, event.target.value)}
+            aria-describedby={describedBy}
             aria-invalid={fieldError ? true : undefined}
           />
           {fieldDescription}
@@ -303,9 +352,9 @@ export function ScriptDialogFormFields({
     if (field.type === 'number') {
       return (
         <div key={field.name} className="space-y-2">
-          <Label htmlFor={`script-dialog-${field.name}`}>{field.label}</Label>
+          <Label htmlFor={inputId}>{field.label}</Label>
           <Input
-            id={`script-dialog-${field.name}`}
+            id={inputId}
             type="number"
             value={formValues[field.name] ?? field.defaultValue ?? ''}
             placeholder={field.placeholder}
@@ -313,6 +362,7 @@ export function ScriptDialogFormFields({
             max={field.max}
             step={field.step}
             onChange={(event) => onValueChange(field.name, event.target.value)}
+            aria-describedby={describedBy}
             aria-invalid={fieldError ? true : undefined}
           />
           {fieldDescription}
@@ -321,7 +371,6 @@ export function ScriptDialogFormFields({
       );
     }
 
-    const inputId = `script-dialog-${field.name}`;
     return (
       <div key={field.name} className="space-y-2">
         <label htmlFor={inputId} className="flex items-start gap-2 text-sm">
@@ -330,16 +379,14 @@ export function ScriptDialogFormFields({
             type="checkbox"
             checked={Boolean(formValues[field.name] ?? field.defaultValue)}
             onChange={(event) => onValueChange(field.name, event.target.checked)}
+            aria-describedby={describedBy}
+            aria-invalid={fieldError ? true : undefined}
             className="mt-0.5 h-4 w-4 accent-primary"
           />
           <span className="min-w-0">
             <span className="block font-medium leading-none">{field.label}</span>
-            {field.description ? (
-              <span className="mt-1 block text-xs text-muted-foreground">{field.description}</span>
-            ) : null}
-            {fieldError ? (
-              <span className="mt-1 block text-xs text-destructive">{fieldError}</span>
-            ) : null}
+            {inlineDescription}
+            {inlineErrorMessage}
           </span>
         </label>
       </div>

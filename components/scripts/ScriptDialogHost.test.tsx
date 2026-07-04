@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ScriptDialogRequest } from "../../types/global/netcatty-bridge-script.d.ts";
 import {
   applyFormValue,
+  getDialogFieldDomId,
   getInitialFormValues,
   getVisibleDialogFormFields,
   normalizeDialogFormSubmitValues,
@@ -28,7 +29,7 @@ const formRequest: ScriptDialogRequest = {
         label: "Environment",
         options: [
           { label: "Development", value: "dev" },
-          { label: "Production", value: "prod" },
+          { label: "Production", value: "prod", description: "Use carefully" },
         ],
         defaultValue: "dev",
       },
@@ -115,6 +116,38 @@ test("script dialog form validates required text and number fields", () => {
     requiredNotes: "Required",
     requiredCount: "Required",
   });
+});
+
+test("script dialog form only requires checkboxes when explicitly marked required", () => {
+  const form = {
+    message: "Confirm",
+    fields: [
+      {
+        type: "checkbox" as const,
+        name: "optionalFlag",
+        label: "Optional flag",
+        defaultValue: false,
+      },
+      {
+        type: "checkbox" as const,
+        name: "confirmDanger",
+        label: "I understand",
+        defaultValue: false,
+        required: true,
+      },
+    ],
+  };
+
+  assert.deepEqual(validateDialogFormValues(form, {
+    optionalFlag: false,
+    confirmDanger: false,
+  }, "Required"), {
+    confirmDanger: "Required",
+  });
+  assert.deepEqual(validateDialogFormValues(form, {
+    optionalFlag: false,
+    confirmDanger: true,
+  }, "Required"), {});
 });
 
 test("script dialog form validates number min max and step before submit", () => {
@@ -286,7 +319,7 @@ test("script dialog form does not show fields chained from hidden controllers", 
 });
 
 test("script dialog form fields render select checkbox radio textarea and number controls", () => {
-  const values = getInitialFormValues(formRequest);
+  const values = applyFormValue(getInitialFormValues(formRequest), "env", "prod");
   const markup = renderToStaticMarkup(
     <ScriptDialogFormFields
       form={formRequest.form!}
@@ -296,6 +329,9 @@ test("script dialog form fields render select checkbox radio textarea and number
   );
 
   assert.match(markup, /Environment/);
+  assert.match(markup, /Use carefully/);
+  assert.match(markup, /id="script-dialog-env-label"/);
+  assert.match(markup, /aria-labelledby="script-dialog-env-label"/);
   assert.match(markup, /Restart service/);
   assert.match(markup, /type="checkbox"[^>]*checked=""/);
   assert.match(markup, /type="radio"[^>]*checked=""[^>]*value="safe"/);
@@ -370,5 +406,124 @@ test("script dialog form fields render required errors", () => {
   );
 
   assert.match(markup, /aria-invalid="true"/);
+  assert.match(markup, /id="script-dialog-retries-error"/);
+  assert.match(markup, /aria-describedby="script-dialog-retries-error"/);
   assert.match(markup, /Required/);
+});
+
+test("script dialog form fields associate checkbox errors with the input", () => {
+  const form = {
+    message: "Confirm",
+    fields: [{
+      type: "checkbox" as const,
+      name: "confirmDanger",
+      label: "I understand",
+      description: "Required before continuing",
+      defaultValue: false,
+      required: true,
+    }],
+  };
+  const markup = renderToStaticMarkup(
+    <ScriptDialogFormFields
+      form={form}
+      formValues={{ confirmDanger: false }}
+      formErrors={{ confirmDanger: "Required" }}
+      onValueChange={() => {}}
+    />,
+  );
+
+  assert.match(markup, /id="script-dialog-confirmDanger-description"/);
+  assert.match(markup, /id="script-dialog-confirmDanger-error"/);
+  assert.match(
+    markup,
+    /aria-describedby="script-dialog-confirmDanger-description script-dialog-confirmDanger-error"/,
+  );
+  assert.match(markup, /aria-invalid="true"/);
+});
+
+test("script dialog form field DOM ids encode names with spaces", () => {
+  const form = {
+    message: "Confirm",
+    fields: [{
+      type: "checkbox" as const,
+      name: "confirm danger",
+      label: "I understand",
+      description: "Required before continuing",
+      defaultValue: false,
+      required: true,
+    }],
+  };
+  const markup = renderToStaticMarkup(
+    <ScriptDialogFormFields
+      form={form}
+      formValues={{ "confirm danger": false }}
+      formErrors={{ "confirm danger": "Required" }}
+      onValueChange={() => {}}
+    />,
+  );
+
+  assert.equal(getDialogFieldDomId("confirm danger"), "script-dialog-confirm%20danger");
+  assert.match(markup, /id="script-dialog-confirm%20danger"/);
+  assert.match(
+    markup,
+    /aria-describedby="script-dialog-confirm%20danger-description script-dialog-confirm%20danger-error"/,
+  );
+  assert.doesNotMatch(markup, /script-dialog-confirm danger/);
+});
+
+test("script dialog form control ids encode spaced names for radio text and number fields", () => {
+  const form = {
+    message: "Spaced names",
+    fields: [
+      {
+        type: "radio" as const,
+        name: "run mode",
+        label: "Run mode",
+        description: "Choose mode",
+        options: [
+          { label: "Safe", value: "safe" },
+          { label: "Fast", value: "fast" },
+        ],
+        defaultValue: "safe",
+      },
+      {
+        type: "textarea" as const,
+        name: "release notes",
+        label: "Release notes",
+        defaultValue: "",
+      },
+      {
+        type: "number" as const,
+        name: "retry count",
+        label: "Retry count",
+        defaultValue: 3,
+      },
+    ],
+  };
+  const markup = renderToStaticMarkup(
+    <ScriptDialogFormFields
+      form={form}
+      formValues={{
+        "run mode": "safe",
+        "release notes": "",
+        "retry count": 3,
+      }}
+      formErrors={{
+        "run mode": "Required",
+        "release notes": "Required",
+        "retry count": "Required",
+      }}
+      onValueChange={() => {}}
+    />,
+  );
+
+  assert.match(markup, /id="script-dialog-run%20mode-0"/);
+  assert.match(markup, /name="script-dialog-run%20mode"/);
+  assert.match(markup, /id="script-dialog-release%20notes"/);
+  assert.match(markup, /for="script-dialog-release%20notes"/);
+  assert.match(markup, /id="script-dialog-retry%20count"/);
+  assert.match(markup, /for="script-dialog-retry%20count"/);
+  assert.doesNotMatch(markup, /script-dialog-run mode/);
+  assert.doesNotMatch(markup, /script-dialog-release notes/);
+  assert.doesNotMatch(markup, /script-dialog-retry count/);
 });
