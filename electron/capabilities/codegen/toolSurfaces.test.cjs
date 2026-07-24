@@ -39,12 +39,55 @@ test("listCattyToolSpecs includes vault host tools and SFTP transfer", () => {
   const capabilityIds = listCattyToolSpecs().map((spec) => spec.capabilityId);
   assert.ok(capabilityIds.includes("vault.host.get"));
   assert.ok(capabilityIds.includes("vault.host.list"));
+  assert.ok(capabilityIds.includes("vault.host.open"));
   assert.ok(capabilityIds.includes("vault.hosts.create"));
+  assert.ok(capabilityIds.includes("vault.host.update"));
+  assert.ok(capabilityIds.includes("vault.host.delete"));
   assert.ok(capabilityIds.includes("vault.host.import"));
   assert.ok(capabilityIds.includes("vault.note.create"));
   assert.ok(capabilityIds.includes("vault.note.list"));
   assert.ok(capabilityIds.includes("sftp.download"));
   assert.ok(capabilityIds.includes("sftp.upload"));
+});
+
+test("listMcpTools includes vault host update and delete for external MCP clients", () => {
+  const tools = listMcpTools();
+  const create = tools.find((tool) => tool.mcpTool === "vault_hosts_create");
+  const update = tools.find((tool) => tool.mcpTool === "vault_hosts_update");
+  const remove = tools.find((tool) => tool.mcpTool === "vault_hosts_delete");
+  assert.match(create?.inputShape.hosts?.description ?? "", /passphrase/i);
+  assert.equal(update?.capabilityId, "vault.host.update");
+  assert.equal(update?.publicRpcMethod, "public/vault/hosts/update");
+  assert.ok(update?.inputShape.keyPath);
+  assert.ok(update?.inputShape.keypath);
+  assert.ok(update?.inputShape.savePassword);
+  assert.ok(update?.inputShape.passphrase);
+  assert.equal(remove?.capabilityId, "vault.host.delete");
+  assert.equal(remove?.publicRpcMethod, "public/vault/hosts/delete");
+});
+
+test("listMcpTools includes host_open for external MCP clients", () => {
+  const tools = listMcpTools();
+  const hostOpen = tools.find((tool) => tool.mcpTool === "host_open");
+  assert.ok(hostOpen);
+  assert.equal(hostOpen.capabilityId, "vault.host.open");
+  assert.equal(hostOpen.publicRpcMethod, "public/vault/hosts/open");
+});
+
+test("session_close is exposed to agents and external MCP clients", () => {
+  const mcpTool = listMcpTools().find((tool) => tool.mcpTool === "session_close");
+  assert.ok(mcpTool);
+  assert.equal(mcpTool.capabilityId, "session.close");
+  assert.equal(mcpTool.publicRpcMethod, "public/session/close");
+
+  const cattyTool = listCattyToolSpecs().find((tool) => tool.toolName === "session_close");
+  assert.ok(cattyTool);
+  assert.equal(cattyTool.rpcMethod, "session/close");
+});
+
+test("host_open tells agents to close sessions after use", () => {
+  const hostOpen = listMcpTools().find((tool) => tool.mcpTool === "host_open");
+  assert.match(hostOpen?.description || "", /session_close/i);
 });
 
 test("vault host import tool description routes unknown attached host text to host creation", () => {
@@ -168,4 +211,27 @@ test("registerMcpTools registers one handler per catalog MCP tool", () => {
   });
   assert.equal(count, listMcpTools().length);
   assert.equal(registered.length, listMcpTools().length);
+});
+
+test("session_close remains available as a cleanup action in observer mode", async () => {
+  let handler = null;
+  let guardCalls = 0;
+  const fakeServer = {
+    tool(name, _description, _shape, candidate) {
+      if (name === "session_close") handler = candidate;
+    },
+  };
+  registerMcpTools(fakeServer, {
+    rpcCall: async (_method, params) => ({ ok: true, sessionId: params.sessionId, status: "closed" }),
+    scopeParams: { chatSessionId: "chat-1" },
+    guardWriteOperation: () => {
+      guardCalls += 1;
+      return "Observer mode";
+    },
+    catalogDescription: (_name, fallback) => fallback,
+  });
+
+  const result = await handler({ sessionId: "session-1" });
+  assert.equal(result.isError, undefined);
+  assert.equal(guardCalls, 0);
 });

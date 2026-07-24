@@ -1,4 +1,4 @@
-import { Folder, FolderLock, Menu, Moon, MoreHorizontal, Plus, Settings, Sparkles, Sun } from 'lucide-react';
+import { Folder, FolderLock, Menu, MoreHorizontal, Plus, Settings, Sparkles } from 'lucide-react';
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { fromEditorTabId, isEditorTabId, useActiveTabId } from '../application/state/activeTabStore';
 import { isHostTreeWorkTabSurface } from '../application/app/workTabSurface';
@@ -23,17 +23,20 @@ import { Button } from './ui/button';
 import { ContextMenuItem, ContextMenuSeparator } from './ui/context-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { SyncStatusButton } from './SyncStatusButton';
-import { WindowOpacityButton } from './WindowOpacityButton';
+import { GlobalSftpTransferCenter } from './GlobalSftpTransferCenter';
+import { TopTabsQuickControls } from './TopTabsQuickControls';
 import {
   ActiveTabAutoScroller,
   EditorTopTab,
   LogViewTopTab,
+  PluginViewTopTab,
   RootTopTab,
   SessionTopTab,
   scrollTopTabIntoComfortView,
   WindowControls,
   WorkspaceTopTab,
 } from './top-tabs/TopTabItems';
+import type { PluginViewTab } from '../application/state/pluginViewTabStore';
 import { TERMINAL_HOST_TREE_ANIMATION_MS } from '../application/state/terminalHostTreeAnimation';
 import {
   scheduleAfterInstantThemeSwitch,
@@ -135,6 +138,9 @@ interface TopTabsProps {
   onOpenQuickSwitcher: () => void;
   onToggleTheme: () => void;
   onOpenSettings: () => void;
+  externalMcpEnabled: boolean;
+  onToggleExternalMcp: (enabled: boolean) => void;
+  showExternalMcpToggle?: boolean;
   windowOpacity: number;
   setWindowOpacity: (opacity: number) => void;
   onSyncNow?: () => Promise<void>;
@@ -149,6 +155,8 @@ interface TopTabsProps {
   showHostTreeSidebar: boolean;
   dynamicTabTitleMode?: DynamicTabTitleMode;
   editorTabs: readonly EditorTab[];
+  pluginViewTabs: readonly PluginViewTab[];
+  onClosePluginViewTab: (tabId: string) => void;
   onRequestCloseEditorTab: (editorTabId: string) => void;
   hostById: Map<string, Host>;
 }
@@ -174,6 +182,9 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
   onOpenQuickSwitcher,
   onToggleTheme,
   onOpenSettings,
+  externalMcpEnabled,
+  onToggleExternalMcp,
+  showExternalMcpToggle = true,
   windowOpacity,
   setWindowOpacity,
   onSyncNow,
@@ -185,6 +196,8 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
   showHostTreeSidebar,
   dynamicTabTitleMode,
   editorTabs,
+  pluginViewTabs,
+  onClosePluginViewTab,
   onRequestCloseEditorTab,
   hostById,
 }) => {
@@ -623,6 +636,11 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
     return map;
   }, [editorTabs]);
 
+  const pluginViewTabMap = useMemo(
+    () => new Map(pluginViewTabs.map((tab) => [tab.id, tab])),
+    [pluginViewTabs],
+  );
+
   // fileName → count, for the rename-disambiguation suffix in the render loop.
   // Memoed so we don't do a per-tab O(n) filter on every render (was O(n²)).
   const editorTabFileNameCounts = useMemo(() => {
@@ -640,6 +658,8 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
         if (!editorTab) return null;
         return { type: 'editor' as const, id: tabId, editorTab };
       }
+      const pluginViewTab = pluginViewTabMap.get(tabId);
+      if (pluginViewTab) return { type: 'pluginView' as const, id: tabId, pluginViewTab };
       const session = orphanSessionMap.get(tabId);
       const workspace = workspaceMap.get(tabId);
       const logView = logViewMap.get(tabId);
@@ -654,7 +674,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
       }
       return null;
     }).filter(Boolean);
-  }, [orderedTabs, editorTabMap, orphanSessionMap, workspaceMap, logViewMap, workspacePaneCounts]);
+  }, [orderedTabs, editorTabMap, pluginViewTabMap, orphanSessionMap, workspaceMap, logViewMap, workspacePaneCounts]);
 
   // Bulk-close menu items shared by session and workspace context menus.
   // Anchor is the tab the user right-clicked on (matches VSCode/JetBrains UX).
@@ -719,6 +739,30 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             shiftStyle={shiftStyle}
             showDropIndicatorBefore={showDropIndicatorBefore}
             showDropIndicatorAfter={showDropIndicatorAfter}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            tabAnimationClass={getTabAnimationClass(tabId)}
+          />
+        );
+      }
+
+      if (item.type === 'pluginView') {
+        const tabId = item.id;
+        return (
+          <PluginViewTopTab
+            key={tabId}
+            tab={item.pluginViewTab}
+            onClose={onClosePluginViewTab}
+            renderBulkCloseItems={renderBulkCloseItems}
+            t={t}
+            isBeingDragged={draggingSessionId === tabId}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={tabShiftStyles[tabId] || emptyTabStyle}
+            showDropIndicatorBefore={dropIndicator?.tabId === tabId && dropIndicator.position === 'before'}
+            showDropIndicatorAfter={dropIndicator?.tabId === tabId && dropIndicator.position === 'after'}
             onTabDragStart={handleTabDragStart}
             onTabDragEnd={handleTabDragEnd}
             onTabDragOver={handleTabDragOver}
@@ -1046,6 +1090,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
           className="flex-shrink-0 flex items-center gap-0.5 app-drag self-end h-7 overflow-visible"
           style={dragRegionStyle}
         >
+          <GlobalSftpTransferCenter />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -1060,32 +1105,22 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             </TooltipTrigger>
             <TooltipContent>{t('topTabs.aiAssistant')}</TooltipContent>
           </Tooltip>
-          <WindowOpacityButton
-            windowOpacity={windowOpacity}
-            setWindowOpacity={setWindowOpacity}
-            className="h-7 w-7 shrink-0 top-tab-utility-btn"
-            style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
-          />
           <SyncStatusButton
             onOpenSettings={onOpenSettings}
             onSyncNow={onSyncNow}
             className="h-7 w-7 shrink-0 top-tab-utility-btn"
             style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
           />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 shrink-0 app-no-drag top-tab-utility-btn"
-                style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
-                onClick={onToggleTheme}
-              >
-                {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t('topTabs.toggleTheme')}</TooltipContent>
-          </Tooltip>
+          <TopTabsQuickControls
+            theme={theme}
+            onToggleTheme={onToggleTheme}
+            externalMcpEnabled={externalMcpEnabled}
+            onToggleExternalMcp={onToggleExternalMcp}
+            showExternalMcpToggle={showExternalMcpToggle}
+            windowOpacity={windowOpacity}
+            setWindowOpacity={setWindowOpacity}
+            style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
+          />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -1121,11 +1156,16 @@ const topTabsAreEqual = (prev: TopTabsProps, next: TopTabsProps): boolean => {
     prev.workspaces === next.workspaces &&
     prev.orderedTabs === next.orderedTabs &&
     prev.logViews === next.logViews &&
+    prev.pluginViewTabs === next.pluginViewTabs &&
+    prev.onClosePluginViewTab === next.onClosePluginViewTab &&
     prev.draggingSessionId === next.draggingSessionId &&
     prev.isMacClient === next.isMacClient &&
     prev.onCopySession === next.onCopySession &&
     prev.onCopySessionToNewWindow === next.onCopySessionToNewWindow &&
     prev.onOpenSettings === next.onOpenSettings &&
+    prev.externalMcpEnabled === next.externalMcpEnabled &&
+    prev.onToggleExternalMcp === next.onToggleExternalMcp &&
+    prev.showExternalMcpToggle === next.showExternalMcpToggle &&
     prev.windowOpacity === next.windowOpacity &&
     prev.setWindowOpacity === next.setWindowOpacity &&
     prev.onSyncNow === next.onSyncNow &&

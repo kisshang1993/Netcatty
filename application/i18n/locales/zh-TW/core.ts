@@ -28,6 +28,13 @@ export const zhTWCoreMessages: Messages = {
   'common.left': '左側',
   'common.right': '右側',
   'common.more': '更多',
+  'toolbar.layout.customize': '自訂工具列',
+  'toolbar.layout.show': '顯示',
+  'toolbar.layout.collapse': '摺疊',
+  'toolbar.layout.hide': '隱藏',
+  'toolbar.layout.moveEarlier': '前移',
+  'toolbar.layout.moveLater': '後移',
+  'toolbar.layout.reset': '恢復預設',
   'common.selectAHost': '選擇主機',
   'sort.manual': '手動順序',
   'sort.az': 'A-z',
@@ -103,6 +110,21 @@ export const zhTWCoreMessages: Messages = {
   'settings.system.credentials.unknown': '未知（目前環境不支援）',
   'settings.system.credentials.unavailableHint': '在其他使用者或機器上加密的憑證無法在此處解密。請在目前裝置重新輸入並儲存憑證。',
   'settings.system.credentials.portabilityHint': '雲同步可跨裝置，因為使用主金鑰加密；本機 safeStorage 加密僅綁定目前系統使用者/裝置。',
+
+  // Settings > System > Network Proxy
+  'settings.system.networkProxy.title': '網路代理',
+  'settings.system.networkProxy.description': '用於雲端同步與 AI 服務商的 HTTP(S) 代理。與 SSH 的 ProxyJump / ProxyCommand 設定無關。',
+  'settings.system.networkProxy.mode': '代理模式',
+  'settings.system.networkProxy.mode.system': '系統代理',
+  'settings.system.networkProxy.mode.direct': '直連（不使用代理）',
+  'settings.system.networkProxy.mode.custom': '自訂代理',
+  'settings.system.networkProxy.url': '代理位址',
+  'settings.system.networkProxy.url.placeholder': 'http://127.0.0.1:7890',
+  'settings.system.networkProxy.url.desc': '支援 http://、https://、socks5:// 的 host:port 位址。代理 URL 中不支援帳號密碼。',
+  'settings.system.networkProxy.bypass': '略過清單',
+  'settings.system.networkProxy.bypass.placeholder': '<local>,localhost,127.0.0.1',
+  'settings.system.networkProxy.bypass.desc': '逗號分隔、不走代理的主機。可用 <local> 表示本機與區域網路名稱。',
+  'settings.system.networkProxy.hint': '影響 Google Drive / OneDrive / GitHub 同步登入與 AI 服務商請求，不會改變 SSH 連線。',
 
   // Settings > System > Crash Logs
   'settings.system.crashLogs.title': '崩潰日誌',
@@ -210,6 +232,7 @@ export const zhTWCoreMessages: Messages = {
   'tray.empty.title': '一切都很安靜',
   'tray.empty.subtitle': '去連線個伺服器吧，它們想念你了 🚀',
   'tray.quit': '結束 Netcatty',
+  'tray.closeSession': '關閉工作階段',
 
   // Vault Sidebar
   'vault.sidebar.collapse': '收起側邊欄',
@@ -231,6 +254,8 @@ export const zhTWCoreMessages: Messages = {
   'settings.vault.title': '主機庫',
   'settings.vault.showRecentHosts': '顯示最近連線的主機',
   'settings.vault.showRecentHostsDesc': '在主機列表頂部顯示最近連線過的主機',
+  'settings.vault.selectBeforeConnect': '先選取再連線',
+  'settings.vault.selectBeforeConnectDesc': '單擊選取主機（網格模式顯示強調色邊框），再次單擊連線；分組同理。預設仍為單擊直接連線。',
   'settings.vault.showOnlyUngroupedHostsInRoot': '根目錄只顯示未分組主機',
   'settings.vault.showOnlyUngroupedHostsInRootDesc': '開啟後，主機庫根目錄的主機列表只顯示沒有分組的主機，已分組主機請從左側分組進入檢視。',
   'settings.vault.showSftpTab': '顯示 SFTP 標籤頁',
@@ -276,7 +301,110 @@ export const zhTWCoreMessages: Messages = {
   'settings.appearance.themeColor.dark': '深色主題',
   'settings.appearance.customCss': '自訂 CSS',
   'settings.appearance.customCss.desc':
-    '使用自訂 CSS 個人化介面，修改會立即生效。主要 UI 區塊都公開了 [data-section="..."] 屬性供你定位，比如：snippets-panel、host-details-panel、group-details-panel、serial-host-details-panel、ai-chat-panel、vault-sidebar、vault-main、vault-hosts-header、vault-host-list、vault-view、terminal-workspace、terminal-workspace-sidebar（Focus 模式終端列表）、terminal-host-tree-sidebar、terminal-host-tree-sidebar-content、terminal-host-tree-sidebar-row、terminal-side-panel（SFTP/指令碼/主題/AI 側欄，開啟時生效）、terminal-side-panel-tabs、terminal-side-panel-content、terminal-sftp-panel、terminal-sftp-host-header、terminal-sftp-pane、terminal-sftp-toolbar、terminal-sftp-path、terminal-sftp-filter-bar、terminal-sftp-list、terminal-sftp-list-header、terminal-sftp-list-row、terminal-sftp-tree、terminal-sftp-tree-row、terminal-sftp-transfer-queue、terminal-sftp-transfer-row、terminal-split-pane、terminal-split-resizer、top-tabs、top-tabs-host-tree-toggle、top-tabs-quick-switcher-toggle。',
+    '使用自訂 CSS 個人化介面，修改會立即生效。',
+  'settings.appearance.customCss.help.ariaLabel': '自訂 CSS 說明',
+  'settings.appearance.customCss.help.title': '自訂 CSS 說明',
+  'settings.appearance.customCss.help.body': `主要 UI 區塊都公開了 \`data-section\` 屬性，供你用 CSS 定位。編輯後會立即生效。
+
+### 如何選擇元素
+
+使用屬性選擇器：
+
+\`\`\`css
+[data-section="terminal-side-panel"] {
+  border: 2px solid #00c851 !important;
+  border-radius: 6px !important;
+}
+\`\`\`
+
+部分列 / 窗格還支援 \`[data-selected="true"]\`、\`[data-focused="true"]\` 等狀態鉤子。
+
+由於 Tailwind 工具類優先順序較高，覆蓋樣式時通常需要使用 \`!important\`。
+
+### 頂部標籤列
+
+- \`top-tabs\`
+- \`top-tabs-host-tree-toggle\`
+- \`top-tabs-quick-switcher-toggle\`
+
+### 保險庫
+
+- \`vault-view\`
+- \`vault-sidebar\`
+- \`vault-main\`
+- \`vault-hosts-header\`
+- \`vault-host-list\`
+
+### 終端工作區
+
+- \`terminal-workspace\`
+- \`terminal-workspace-sidebar\` — Focus 模式終端列表
+- \`terminal-host-tree-sidebar\`
+- \`terminal-host-tree-sidebar-content\`
+- \`terminal-host-tree-sidebar-row\`
+- \`terminal-split-pane\`
+- \`terminal-split-resizer\`
+
+### 終端側欄
+
+- \`terminal-side-panel\` — SFTP / 指令碼 / 主題 / AI 側欄（僅在開啟時存在）
+- \`terminal-side-panel-tabs\`
+- \`terminal-side-panel-content\`
+
+### SFTP
+
+- \`terminal-sftp-panel\`
+- \`terminal-sftp-host-header\`
+- \`terminal-sftp-pane\`
+- \`terminal-sftp-toolbar\`
+- \`terminal-sftp-path\`
+- \`terminal-sftp-filter-bar\`
+- \`terminal-sftp-list\`
+- \`terminal-sftp-list-header\`
+- \`terminal-sftp-list-row\`
+- \`terminal-sftp-tree\`
+- \`terminal-sftp-tree-row\`
+- \`terminal-sftp-transfer-queue\`
+- \`terminal-sftp-transfer-row\`
+
+### 詳情 / 工具面板
+
+- \`snippets-panel\`
+- \`host-details-panel\`
+- \`group-details-panel\`
+- \`serial-host-details-panel\`
+- \`ai-chat-panel\`
+
+### 範例
+
+隱藏頂部標籤列裡的主機列表開關：
+
+\`\`\`css
+[data-section="top-tabs-host-tree-toggle"] {
+  width: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+\`\`\`
+
+修改選取的 SFTP 檔案列：
+
+\`\`\`css
+[data-section="terminal-sftp-list-row"][data-selected="true"] {
+  background-color: #00c851 !important;
+  color: #001b10 !important;
+}
+\`\`\`
+
+標示目前聚焦的分割窗格：
+
+\`\`\`css
+[data-section="terminal-split-pane"][data-focused="true"] {
+  outline: 2px solid hsl(var(--primary)) !important;
+  outline-offset: -2px;
+}
+\`\`\`
+`,
   'settings.appearance.customCss.placeholder':
     '/* 範例 — 由於 Tailwind 優先順序較高，需要使用 !important */\n\n/* 隱藏頂部標籤欄裡的主機列表開關 */\n[data-section="top-tabs-host-tree-toggle"] {\n  width: 0 !important;\n  opacity: 0 !important;\n  pointer-events: none !important;\n}\n\n/* 隱藏開啟快速切換器的加號按鈕 */\n[data-section="top-tabs-quick-switcher-toggle"] {\n  display: none !important;\n}\n\n/* SFTP / 操作側欄邊框（關閉側欄後不會殘留） */\n[data-section="terminal-side-panel"] {\n  border: 2px solid #00c851 !important;\n  border-radius: 6px !important;\n}\n\n/* 修改整個操作側欄背景，而不只是頂部標籤 */\n[data-section="terminal-side-panel"],\n[data-section="terminal-side-panel-tabs"],\n[data-section="terminal-side-panel-content"],\n[data-section="terminal-sftp-panel"],\n[data-section="terminal-sftp-pane"],\n[data-section="terminal-sftp-list"],\n[data-section="terminal-sftp-tree"],\n[data-section="terminal-sftp-transfer-queue"] {\n  background-color: #1c384a !important;\n}\n\n/* 修改選取的 SFTP 檔案行 */\n[data-section="terminal-sftp-list-row"][data-selected="true"] {\n  background-color: #00c851 !important;\n  color: #001b10 !important;\n}\n\n/* 加粗分割分割線 */\n[data-section="terminal-split-resizer-bar"] {\n  background-color: hsl(var(--primary)) !important;\n  transform: scale(2) !important;\n}\n\n/* 標示目前聚焦的分割 */\n[data-section="terminal-split-pane"][data-focused="true"] {\n  outline: 2px solid hsl(var(--primary)) !important;\n  outline-offset: -2px;\n}\n\n/* 也可在 設定 → 終端 → 工作區聚焦指示 → 聚焦窗格顯示邊框 */',
   'settings.appearance.language': '語言',
@@ -450,6 +578,12 @@ export const zhTWCoreMessages: Messages = {
   'vault.groups.errors.invalidChars': "分組名稱不能包含 '/' 或 '\\\\'.",
   'vault.groups.errors.duplicatePath': '該位置已存在同名分組。',
 
+  'vault.deleteConfirm.title': '刪除「{name}」？',
+  'vault.deleteConfirm.desc': '此操作不可復原。',
+  'vault.deleteConfirm.packageDesc': '這會刪除程式碼包，包內程式碼片段會保留，並移出該程式碼包。',
+  'vault.deleteConfirm.noteGroupDesc': '這會刪除資料夾，資料夾內筆記會保留，並移出該資料夾。',
+  'vault.deleteConfirm.portForwardingDesc': '這會刪除此埠轉發規則。',
+
   'vault.managedSource.unmanage': '取消託管',
   'vault.managedSource.unmanageSuccess': '已取消託管分組',
 
@@ -470,6 +604,7 @@ export const zhTWCoreMessages: Messages = {
   'vault.hosts.export': '匯出',
   'vault.hosts.export.toast.success': '已匯出 {count} 個主機到 CSV',
   'vault.hosts.export.toast.successWithSkipped': '已匯出 {count} 個主機到 CSV（跳過 {skipped} 個不支援的主機）',
+  'vault.hosts.export.toast.passphrasesSkipped': '有 {count} 個已儲存的金鑰密碼無法讀取，匯出時已留空',
   'vault.hosts.export.toast.noHosts': '沒有主機可匯出',
   'vault.hosts.allHosts': '全部主機',
   'vault.hosts.pinned': '已置頂',
@@ -492,6 +627,9 @@ export const zhTWCoreMessages: Messages = {
   'vault.hosts.empty.title': '設定你的主機',
   'vault.hosts.empty.desc': '儲存主機以快速連線到你的伺服器、虛擬機器和容器。',
   'deepLink.ssh.invalid': '無效的 ssh:// 連結',
+  'deepLink.telnet.invalid': '無效的 telnet:// 連結',
+  'deepLink.jms.invalid': '無效的 JumpServer 連結',
+  'deepLink.jms.unsupported': '不支援的 JumpServer 協定：{{protocol}}',
 
   // Vault import
   'vault.import.title': '新增資料到你的 Vault',
@@ -506,6 +644,14 @@ export const zhTWCoreMessages: Messages = {
   'vault.import.toast.noNewHosts': '從 {format} 沒有匯入到新的主機。',
   'vault.import.toast.summary': '已匯入 {count} 個主機（跳過 {skipped}，重複 {duplicates}）。',
   'vault.import.toast.firstIssue': '首個問題：{issue}',
+  'vault.import.mobaxterm.chooseEncoding': '選擇如何讀取 MobaXterm 檔案。',
+  'vault.import.mobaxterm.encodingQuestion': '這個檔案使用哪種文字編碼？',
+  'vault.import.mobaxterm.auto': '自動偵測',
+  'vault.import.mobaxterm.autoDesc': '建議。能以 UTF-8 讀取時使用 UTF-8，否則使用中文 Windows 編碼。',
+  'vault.import.mobaxterm.utf8': 'UTF-8',
+  'vault.import.mobaxterm.utf8Desc': '適用於已儲存或轉換為 UTF-8 的檔案。',
+  'vault.import.mobaxterm.gb18030': '中文 Windows',
+  'vault.import.mobaxterm.gb18030Desc': '適用於中文 Windows 上匯出的舊版檔案。',
   'vault.import.sshConfig.chooseMode': '選擇如何匯入你的 SSH config 檔案。',
   'vault.import.sshConfig.modeQuestion': '你希望如何匯入？',
   'vault.import.sshConfig.importOnly': '僅匯入',
@@ -595,10 +741,12 @@ export const zhTWCoreMessages: Messages = {
   'sftp.bookmark.addGlobalTooltip': '儲存為全域收藏（所有主機共享）',
   'sftp.bookmark.empty': '暫無收藏路徑',
   'sftp.columns.name': '名稱',
+  'sftp.columns.configure': '選擇顯示的欄位',
   'sftp.columns.modified': '修改時間',
   'sftp.columns.size': '大小',
   'sftp.columns.kind': '型別',
   'sftp.columns.actions': '操作',
+  'sftp.sort.directoriesFirst': '資料夾置頂',
   'sftp.emptyDirectory': '空目錄',
   'sftp.nav.up': '返回上層',
   'sftp.nav.home': '返回主目錄',
@@ -618,6 +766,7 @@ export const zhTWCoreMessages: Messages = {
   'sftp.moveTo.pathNotFound': '目錄不存在或無法存取',
   'sftp.context.download': '下載',
   'sftp.context.copyToOtherPane': '複製到另一側',
+  'sftp.copyToOtherPane.unavailable': '請開啟雙欄 SFTP 檔案管理，並連線目標側後再複製檔案。',
   'sftp.copyCurrentPath': '複製目前路徑',
   'sftp.copyCurrentPath.success': '已複製目前路徑',
   'sftp.copyCurrentPath.error': '無法複製目前路徑',
@@ -666,6 +815,43 @@ export const zhTWCoreMessages: Messages = {
   'sftp.transfers.copyTargetPath': '複製目標路徑',
   'sftp.transfers.copyTargetPathSuccess': '已複製目標路徑',
   'sftp.transfers.copyTargetPathError': '無法複製目標路徑',
+  'sftp.transferCenter.title': '檔案傳輸',
+  'sftp.transferCenter.subtitle': '統一查看所有 SFTP 連線的傳輸工作',
+  'sftp.transferCenter.quitConfirm': '還有 {count} 個檔案傳輸工作未完成。結束後會保留進度，下次開啟時需要手動繼續。確定結束嗎？',
+  'sftp.transferCenter.phase.scanning': '正在掃描',
+  'sftp.transferCenter.phase.compressing': '正在壓縮',
+  'sftp.transferCenter.phase.uploading': '正在上傳',
+  'sftp.transferCenter.phase.transferring': '傳輸中',
+  'sftp.transferCenter.phase.extracting': '正在解壓',
+  'sftp.transferCenter.phase.verifying': '正在校驗',
+  'sftp.transferCenter.bucket.active': '進行中',
+  'sftp.transferCenter.bucket.all': '全部',
+  'sftp.transferCenter.bucket.queued': '排隊中',
+  'sftp.transferCenter.bucket.paused': '已暫停',
+  'sftp.transferCenter.bucket.failed': '失敗',
+  'sftp.transferCenter.bucket.completed': '已完成',
+  'sftp.transferCenter.status.pending': '準備中',
+  'sftp.transferCenter.status.resuming': '正在重新連線並續傳…',
+  'sftp.transferCenter.status.queued': '排隊中',
+  'sftp.transferCenter.status.transferring': '傳輸中',
+  'sftp.transferCenter.status.pausing': '正在完成目前步驟',
+  'sftp.transferCenter.status.paused': '已暫停',
+  'sftp.transferCenter.status.attention': '需要處理',
+  'sftp.transferCenter.status.interrupted': '已中斷，請手動繼續',
+  'sftp.transferCenter.status.completed': '已完成',
+  'sftp.transferCenter.status.failed': '失敗',
+  'sftp.transferCenter.status.cancelled': '已取消',
+  'sftp.transferCenter.background': '背景',
+  'sftp.transferCenter.pause': '暫停',
+  'sftp.transferCenter.resume': '繼續',
+  'sftp.transferCenter.prioritize': '優先傳輸',
+  'sftp.transferCenter.pauseAll': '全部暫停',
+  'sftp.transferCenter.resumeAll': '全部繼續',
+  'sftp.transferCenter.empty': '目前分類沒有傳輸工作',
+  'sftp.transferCenter.showBackground': '顯示 {count} 個背景工作',
+  'sftp.transferCenter.hideBackground': '隱藏背景工作',
+  'sftp.transferCenter.clear': '清除記錄',
+  'sftp.transferCenter.applyAll': '套用到全部',
   'sftp.transfers.resizeNameColumn': '調整檔名列寬',
   'sftp.transfers.dragToResize': '拖拽調整高度',
   'sftp.goUp': '上一級',
@@ -711,6 +897,9 @@ export const zhTWCoreMessages: Messages = {
   'sftp.picker.local.title': '本機檔案系統',
   'sftp.picker.local.desc': '瀏覽本機檔案',
   'sftp.picker.local.badge': '本機',
+  'sftp.picker.connected.section': '已連線',
+  'sftp.picker.connected.badge': '已連線',
+  'sftp.picker.connected.connecting': '連線中',
   'sftp.picker.noMatch': '沒有相符的主機',
   'sftp.permissions.title': '編輯權限',
   'sftp.permissions.owner': '所有者',
@@ -728,4 +917,25 @@ export const zhTWCoreMessages: Messages = {
   'qs.localShells': '本機 Shell',
   'qs.default': '預設',
 
+  'settings.tab.plugins': '外掛程式',
+  'settings.plugins.title': '外掛程式設定',
+  'settings.plugins.description': '由開發外掛程式提供、經 Netcatty 原生元件驗證的設定。',
+  'settings.plugins.loading': '正在載入外掛程式設定…',
+  'settings.plugins.empty': '目前沒有已啟用外掛程式提供設定。',
+  'settings.plugins.scopeContext': '請在對應的 {scope} 情境中開啟此設定。',
+  'settings.plugins.pressKeybinding': '請按下組合鍵',
+  'settings.plugins.validJsonArray': '請輸入有效的 JSON 陣列。',
+  'settings.plugins.browse': '瀏覽',
+  'settings.plugins.restartRequired': '需要重新啟動',
+  'settings.plugins.saving': '正在儲存…',
+  'settings.plugins.storedSecurely': '已安全儲存',
+  'settings.plugins.configuredReplacement': '已設定 — 輸入新值以取代',
+  'settings.plugins.moveItemUp': '將 {label} 的第 {index} 項上移',
+  'settings.plugins.moveItemDown': '將 {label} 的第 {index} 項下移',
+  'settings.plugins.addItem': '新增項目',
+  'settings.plugins.removeItem': '移除項目',
+  'settings.plugins.scopeTargets': '外掛程式設定範圍',
+  'settings.plugins.scopeTarget': '{scope} 目標',
+  'settings.plugins.noScopeTargets': '沒有可用的目標',
+  'settings.plugins.thisDevice': '此裝置',
 };

@@ -22,11 +22,14 @@ import { getNetcattyBridge, generateId, resolveUserSkillsContext } from '../../.
 import {
   buildCattySdkMessages,
   collectOpenAIChatAssistantFieldsForMessages,
+  collectPreservedTerminalWriteFingerprints,
   collectToolResultsAfterMessage,
   createContinuationContext,
 } from './cattyMessageBuilder';
 import { hadToolProgressBeforeRequestTooLarge, processCattyStream } from './cattyStreamProcessor';
 import type { CattyTurnInput, TurnDriver, TurnDriverContext } from './types';
+import { fitLargeUserInputForModel } from '../largeUserInput';
+import { buildPromptContextSnapshot } from '../promptContextSnapshot';
 
 export class CattyTurnDriver implements TurnDriver {
   readonly backend = 'catty' as const;
@@ -57,7 +60,72 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     ui,
   } = input;
 
-  const netcattyBridge = bridge ?? getNetcattyBridge();
+  const netcattyBridge = (bridge ?? getNetcattyBridge()) as NonNullable<ReturnType<typeof getNetcattyBridge>>;
+  const toolOutputTempBridge = netcattyBridge as typeof netcattyBridge & {
+    getToolOutputPersistenceStatus?: () => Promise<{ durable: boolean; reason?: string }>;
+    writeToolOutputTemp?: (
+      record: import('../toolOutputStore').PersistedToolOutputRecord,
+      content: string,
+    ) => Promise<{ ok: boolean; path?: string; error?: string }>;
+    restoreToolOutputTemp?: (
+      handleId: string,
+      chatSessionId: string,
+    ) => Promise<{ path: string; record: import('../toolOutputStore').PersistedToolOutputRecord } | null>;
+    readToolOutputTemp?: (
+      path: string,
+      request: import('../toolOutputStore').ReadToolOutputInput,
+    ) => Promise<Omit<import('../toolOutputStore').ToolOutputReadResult, 'handleId' | 'storedChars' | 'sourceTruncated'> | null>;
+    deleteToolOutputTemp?: (path: string) => Promise<{ ok: boolean }>;
+    deleteChatToolOutputsTemp?: (chatSessionId: string) => Promise<{ deletedCount: number }>;
+    deleteTerminalToolOutputsTemp?: (
+      chatSessionId: string,
+      terminalSessionId: string,
+    ) => Promise<{ deletedCount: number }>;
+  };
+  const persistenceStatus = await toolOutputTempBridge.getToolOutputPersistenceStatus?.()
+    .catch(() => ({ durable: false }));
+  if (
+    toolOutputTempBridge.writeToolOutputTemp
+    && toolOutputTempBridge.readToolOutputTemp
+    && toolOutputTempBridge.deleteToolOutputTemp
+  ) {
+    ctx.toolOutputStore.setPersistence?.({
+      write: async (record, content) => {
+        if (!persistenceStatus?.durable) {
+          throw new Error(persistenceStatus?.reason || 'Secure local storage is unavailable.');
+        }
+        const result = await toolOutputTempBridge.writeToolOutputTemp!(record, content);
+        if (!result.ok || !result.path) {
+          throw new Error(result.error || 'Unable to persist tool output.');
+        }
+        return result.path;
+      },
+      restore: persistenceStatus?.durable && toolOutputTempBridge.restoreToolOutputTemp
+        ? (handleId, chatSessionId) => toolOutputTempBridge.restoreToolOutputTemp!(handleId, chatSessionId)
+        : undefined,
+      read: (path, request) => toolOutputTempBridge.readToolOutputTemp!(path, request),
+      delete: async path => {
+        await toolOutputTempBridge.deleteToolOutputTemp!(path);
+      },
+      deleteSession: toolOutputTempBridge.deleteChatToolOutputsTemp
+        ? async chatSessionId => {
+          await toolOutputTempBridge.deleteChatToolOutputsTemp!(chatSessionId);
+        }
+        : undefined,
+      deleteTerminalSession: toolOutputTempBridge.deleteTerminalToolOutputsTemp
+        ? async (chatSessionId, terminalSessionId) => {
+          await toolOutputTempBridge.deleteTerminalToolOutputsTemp!(chatSessionId, terminalSessionId);
+        }
+        : undefined,
+      deleteTerminalEverywhere: toolOutputTempBridge.deleteTerminalToolOutputsEverywhereTemp
+        ? async terminalSessionId => {
+          await toolOutputTempBridge.deleteTerminalToolOutputsEverywhereTemp!(terminalSessionId);
+        }
+        : undefined,
+    });
+  } else {
+    ctx.toolOutputStore.setPersistence?.(undefined);
+  }
   await clearChatSessionCancelled(sessionId, netcattyBridge);
   if (netcattyBridge.aiMcpUpdateSessions) {
     await netcattyBridge.aiMcpUpdateSessions(context.terminalSessions, sessionId);
@@ -70,6 +138,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     trimmed,
     context.selectedUserSkillSlugs,
   );
+  const modelUserText = fitLargeUserInputForModel(trimmed, sessionId, ctx.toolOutputStore);
   const getExecutorContext = context.getExecutorContext ?? (() => ({
     sessions: context.terminalSessions,
     workspaceId: context.scopeType === 'workspace' ? context.scopeTargetId : undefined,
@@ -102,6 +171,23 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
   }
 
   const activeModelId = context.activeModelId || context.activeProvider.defaultModel || '';
+  const promptContext = buildPromptContextSnapshot({
+    providerId: context.activeProvider.providerId,
+    modelId: activeModelId,
+    permissionMode: context.permissionMode ?? context.globalPermissionMode,
+    scopeType: context.scopeType,
+    scopeLabel: context.scopeLabel,
+    toolNames: Object.keys(tools),
+    selectedSkillSlugs: context.selectedUserSkillSlugs,
+    systemPrompt,
+    webSearchEnabled: isWebSearchReady(context.webSearchConfig),
+    hostSessionIds: context.terminalSessions.map(session => session.sessionId),
+  });
+  ctx.emit({
+    id: `context-snapshot-${ctx.turnId}`,
+    type: 'context_snapshot',
+    snapshot: promptContext,
+  } as import('../types').AgentEvent);
   const continuationContext = createContinuationContext(
     context.activeProvider.id,
     context.activeProvider.providerId,
@@ -120,10 +206,12 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     ) => buildCattySdkMessages({
       allMessages,
       includeCurrentUserMessage,
-      trimmed,
+      trimmed: modelUserText,
       attachments: includeCurrentUserMessage ? attachments : undefined,
       continuationContext,
       preserveTerminalToolResults: options.preserveTerminalToolResults,
+      chatSessionId: sessionId,
+      toolOutputStore: ctx.toolOutputStore,
       fieldsByMessage: openAIChatAssistantFieldsByMessage,
     });
 
@@ -185,6 +273,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
         reservedTokens: getRequestReserveTokens,
         maxOutputTokens,
         model,
+        toolOutputStore: ctx.toolOutputStore,
         abortSignal: signal,
         trigger: options.force ? 'force' : options.compressForRequestTooLargeRetry ? '413-retry' : 'pre-turn',
         force: options.force,
@@ -234,6 +323,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       scopeType: context.scopeType,
       scopeLabel: context.scopeLabel,
       userGoal: extractLatestUserGoal(messagesForStream),
+      promptContext,
     });
     const commandTimeoutSeconds =
       Number.isFinite(context.commandTimeout) && context.commandTimeout > 0
@@ -298,9 +388,15 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       const hadToolProgress = hadToolProgressBeforeRequestTooLarge(streamErr);
       let retryBaseMessages = messagesForStream;
       let retryAssistantMsgId = assistantMsgId;
+      let preservedWriteFingerprints: string[] = [];
       if (hadToolProgress) {
         const latestSession = ui.getLatestSession?.(sessionId);
         if (latestSession) {
+          preservedWriteFingerprints = collectPreservedTerminalWriteFingerprints(
+            latestSession.messages,
+            assistantMsgId,
+            sessionId,
+          );
           retryBaseMessages = buildSdkMessages(latestSession.messages, false, {
             preserveTerminalToolResults: collectToolResultsAfterMessage(
               latestSession.messages,
@@ -330,6 +426,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
           pendingApproval: undefined,
         }));
       }
+      ctx.toolResultDedup.enableWriteReplay(preservedWriteFingerprints);
       const retryMessages = prepareMessagesForStream(await compactMessages(retryBaseMessages, {
         force: true,
         compressForRequestTooLargeRetry: true,

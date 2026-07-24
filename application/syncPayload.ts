@@ -67,6 +67,7 @@ import {
   STORAGE_KEY_SFTP_GLOBAL_BOOKMARKS,
   STORAGE_KEY_CUSTOM_THEMES,
   STORAGE_KEY_SHOW_RECENT_HOSTS,
+  STORAGE_KEY_HOST_CLICK_BEHAVIOR,
   STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT,
   STORAGE_KEY_SHOW_SFTP_TAB,
   STORAGE_KEY_SHOW_HOST_TREE_SIDEBAR,
@@ -91,6 +92,7 @@ import {
   STORAGE_KEY_PORT_FORWARDING,
 } from '../infrastructure/config/storageKeys';
 import { isTerminalSidePanelAutoOpenTab } from '../domain/terminalSidePanelAutoOpen';
+import { prepareRestoredPayloadConvergentWrites } from './convergentSyncReplica';
 
 // ---------------------------------------------------------------------------
 // Input types
@@ -200,12 +202,16 @@ const SYNCABLE_TERMINAL_KEYS = [
   'scrollback', 'drawBoldInBrightColors', 'terminalEmulationType',
   'fontLigatures', 'fontSmoothing', 'fontWeight', 'fontWeightBold', 'fallbackFont',
   'linePadding', 'cursorShape', 'cursorBlink', 'minimumContrastRatio',
-  'altAsMeta', 'optionArrowWordJump', 'scrollOnInput', 'scrollOnOutput', 'scrollOnKeyPress', 'scrollOnPaste',
+  'altAsMeta', 'optionArrowWordJump', 'shiftEnterNewlineEnabled', 'shiftEnterNewlineText',
+  'kittyKeyboardProtocolEnabled',
+  'scrollOnInput', 'scrollOnOutput', 'scrollOnKeyPress', 'scrollOnPaste',
   'smoothScrolling',
-  'rightClickBehavior', 'middleClickBehavior', 'copyOnSelect', 'middleClickPaste', 'wordSeparators',
+  'rightClickBehavior', 'middleClickBehavior', 'copyOnSelect', 'normalizeTextOnCopy', 'middleClickPaste', 'wordSeparators',
   'linkModifier', 'keywordHighlightEnabled', 'keywordHighlightRules',
   'keepaliveInterval', 'keepaliveCountMax', 'disableBracketedPaste', 'clearWipesScrollback',
-  'preserveSelectionOnInput', 'forcePromptNewLine', 'osc52Clipboard', 'dynamicTabTitleMode', 'showServerStats',
+  'preserveSelectionOnInput', 'forcePromptNewLine', 'osc52Clipboard', 'dynamicTabTitleMode',
+  'autoCloseOnExit',
+  'showHostInfoBar', 'showServerStats',
   'serverStatsRefreshInterval',
   'systemManagerProcessRefreshInterval', 'systemManagerTmuxRefreshInterval',
   'systemManagerDockerListRefreshInterval', 'systemManagerDockerStatsRefreshInterval',
@@ -244,6 +250,7 @@ export const SYNCABLE_SETTING_STORAGE_KEYS = [
   STORAGE_KEY_SFTP_DEFAULT_VIEW_MODE,
   STORAGE_KEY_SFTP_GLOBAL_BOOKMARKS,
   STORAGE_KEY_SHOW_RECENT_HOSTS,
+  STORAGE_KEY_HOST_CLICK_BEHAVIOR,
   STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT,
   STORAGE_KEY_SHOW_SFTP_TAB,
   STORAGE_KEY_SHELL_ONLY_TAB_NUMBER_SHORTCUTS,
@@ -454,6 +461,10 @@ export function collectSyncableSettings(): SyncPayload['settings'] {
 
   const showRecent = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_RECENT_HOSTS);
   if (showRecent != null) settings.showRecentHosts = showRecent;
+  const hostClickBehavior = localStorageAdapter.readString(STORAGE_KEY_HOST_CLICK_BEHAVIOR);
+  if (hostClickBehavior === 'connect' || hostClickBehavior === 'select') {
+    settings.hostClickBehavior = hostClickBehavior;
+  }
   const showOnlyUngroupedHostsInRoot = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT);
   if (showOnlyUngroupedHostsInRoot != null) settings.showOnlyUngroupedHostsInRoot = showOnlyUngroupedHostsInRoot;
   const showSftpTab = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_SFTP_TAB);
@@ -659,6 +670,9 @@ async function applySyncableSettings(settings: NonNullable<SyncPayload['settings
   if (settings.sftpGlobalBookmarks != null) localStorageAdapter.write(STORAGE_KEY_SFTP_GLOBAL_BOOKMARKS, settings.sftpGlobalBookmarks);
 
   if (settings.showRecentHosts != null) localStorageAdapter.writeBoolean(STORAGE_KEY_SHOW_RECENT_HOSTS, settings.showRecentHosts);
+  if (settings.hostClickBehavior === 'connect' || settings.hostClickBehavior === 'select') {
+    localStorageAdapter.writeString(STORAGE_KEY_HOST_CLICK_BEHAVIOR, settings.hostClickBehavior);
+  }
   if (settings.showOnlyUngroupedHostsInRoot != null) {
     localStorageAdapter.writeBoolean(
       STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT,
@@ -936,9 +950,37 @@ export function applySyncPayload(
   return applyPayload(payload, importers, { includeLocalOnlyData: false });
 }
 
-export function applyLocalVaultPayload(
+export async function prepareLocalVaultPayloadApply(
   payload: SyncPayload,
   importers: SyncPayloadImporters,
+  dependencies: {
+    prepareConvergentRestore?: (
+      payload: SyncPayload,
+    ) => Promise<() => Promise<void>>;
+  } = {},
+): Promise<() => Promise<void>> {
+  const prepareConvergentRestore = dependencies.prepareConvergentRestore
+    ?? prepareRestoredPayloadConvergentWrites;
+  const commitConvergentRestore = await prepareConvergentRestore(payload);
+  return async () => {
+    await applyPayload(payload, importers, { includeLocalOnlyData: true });
+    await commitConvergentRestore();
+  };
+}
+
+export async function applyLocalVaultPayload(
+  payload: SyncPayload,
+  importers: SyncPayloadImporters,
+  dependencies: {
+    prepareConvergentRestore?: (
+      payload: SyncPayload,
+    ) => Promise<() => Promise<void>>;
+  } = {},
 ): Promise<void> {
-  return applyPayload(payload, importers, { includeLocalOnlyData: true });
+  const applyPreparedPayload = await prepareLocalVaultPayloadApply(
+    payload,
+    importers,
+    dependencies,
+  );
+  await applyPreparedPayload();
 }

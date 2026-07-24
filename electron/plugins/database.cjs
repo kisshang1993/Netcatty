@@ -1,0 +1,669 @@
+"use strict";
+
+const { createHash } = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { DatabaseSync } = require("node:sqlite");
+
+const SCHEMA_VERSION = 1;
+const MAX_SECURITY_AUDIT_DETAILS_BYTES = 16 * 1024;
+const MAX_SECURITY_AUDIT_RECORDS_PER_PLUGIN = 1_000;
+const REQUIRED_SCHEMA_COLUMNS = Object.freeze({
+  plugins: ["id", "enabled", "active_version", "installed_at", "updated_at"],
+  plugin_versions: ["plugin_id", "version", "manifest_json", "archive_sha256", "package_relative_path", "installed_at"],
+  plugin_runtime_state: ["plugin_id", "plugin_version", "status", "runtime_kind", "last_error", "quarantined_at", "updated_at"],
+  plugin_crashes: ["plugin_id", "plugin_version", "crashed_at"],
+  plugin_kv: ["plugin_id", "key", "value_json", "updated_at"],
+  plugin_settings: ["plugin_id", "setting_id", "scope", "scope_id", "value_json", "updated_at"],
+  plugin_view_state: ["plugin_id", "view_id", "scope_id", "state_json", "updated_at"],
+  plugin_permission_grants: ["plugin_id", "permission", "resource", "resource_kind", "declaration_hash", "granted_at"],
+  plugin_secrets: ["plugin_id", "key", "secret_ref", "ciphertext", "created_at", "updated_at"],
+  plugin_security_audit: ["id", "plugin_id", "event", "details_json", "created_at"],
+});
+
+function parseJson(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Corrupt plugin database ${label}`);
+  }
+}
+
+class PluginDatabase {
+  constructor(databasePath, options = {}) {
+    if (typeof databasePath !== "string" || !path.isAbsolute(databasePath)) {
+      throw new TypeError("Plugin database path must be absolute");
+    }
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
+    this.databasePath = databasePath;
+    this.clock = options.clock ?? (() => Date.now());
+    const ownsDatabase = !options.database;
+    this.db = options.database ?? new DatabaseSync(databasePath);
+    try {
+      this.#initializeSchema();
+    } catch (error) {
+      if (ownsDatabase) {
+        try { this.db.close(); } catch {}
+      }
+      throw error;
+    }
+  }
+
+  #initializeSchema() {
+    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
+    const version = Number(this.db.prepare("PRAGMA user_version").get()?.user_version ?? 0);
+    if (version > SCHEMA_VERSION) {
+      throw new Error(`Plugin database schema ${version} is newer than supported ${SCHEMA_VERSION}`);
+    }
+    if (version === 0) {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE plugins (
+            id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+            active_version TEXT,
+            installed_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE TABLE plugin_versions (
+            plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,
+            version TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            archive_sha256 TEXT NOT NULL,
+            package_relative_path TEXT NOT NULL,
+            installed_at INTEGER NOT NULL,
+            PRIMARY KEY (plugin_id, version)
+          );
+          CREATE TABLE plugin_runtime_state (
+            plugin_id TEXT NOT NULL,
+            plugin_version TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'stopped',
+            runtime_kind TEXT,
+            last_error TEXT,
+            quarantined_at INTEGER,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (plugin_id, plugin_version),
+            FOREIGN KEY (plugin_id, plugin_version)
+              REFERENCES plugin_versions(plugin_id, version) ON DELETE CASCADE
+          );
+          CREATE TABLE plugin_crashes (
+            plugin_id TEXT NOT NULL,
+            plugin_version TEXT NOT NULL,
+            crashed_at INTEGER NOT NULL,
+            FOREIGN KEY (plugin_id, plugin_version)
+              REFERENCES plugin_versions(plugin_id, version) ON DELETE CASCADE
+          );
+          CREATE INDEX plugin_crashes_lookup
+            ON plugin_crashes(plugin_id, plugin_version, crashed_at);
+          CREATE TABLE plugin_kv (
+            plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (plugin_id, key)
+          );
+          CREATE TABLE plugin_settings (
+            plugin_id TEXT NOT NULL,
+            setting_id TEXT NOT NULL,
+            scope TEXT NOT NULL CHECK (scope IN ('application', 'workspace', 'host', 'session', 'device')),
+            scope_id TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (plugin_id, setting_id, scope, scope_id)
+          );
+          CREATE INDEX plugin_settings_lookup
+            ON plugin_settings(plugin_id, scope, scope_id, setting_id);
+          CREATE TABLE plugin_view_state (
+            plugin_id TEXT NOT NULL,
+            view_id TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            state_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (plugin_id, view_id, scope_id)
+          );
+          CREATE INDEX plugin_view_state_lookup
+            ON plugin_view_state(plugin_id, scope_id, view_id);
+          CREATE TABLE plugin_permission_grants (
+            plugin_id TEXT NOT NULL,
+            permission TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            resource_kind TEXT NOT NULL CHECK (resource_kind IN ('exact', 'directory')),
+            declaration_hash TEXT NOT NULL,
+            granted_at INTEGER NOT NULL,
+            PRIMARY KEY (plugin_id, permission, resource)
+          );
+          CREATE TABLE plugin_secrets (
+            plugin_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            secret_ref TEXT NOT NULL UNIQUE,
+            ciphertext BLOB NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (plugin_id, key)
+          );
+          CREATE INDEX plugin_secrets_ref_lookup
+            ON plugin_secrets(plugin_id, secret_ref);
+          CREATE TABLE plugin_security_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plugin_id TEXT NOT NULL,
+            event TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          CREATE INDEX plugin_security_audit_lookup
+            ON plugin_security_audit(plugin_id, created_at DESC);
+          PRAGMA user_version = 1;
+        `);
+      });
+    }
+    this.#assertSchemaLayout();
+  }
+
+  #assertSchemaLayout() {
+    for (const [table, columns] of Object.entries(REQUIRED_SCHEMA_COLUMNS)) {
+      const actual = this.db.prepare(`PRAGMA table_info(${table})`).all().map(({ name }) => name);
+      if (JSON.stringify(actual) !== JSON.stringify(columns)) {
+        throw new Error(
+          "Pre-release plugin database schema is obsolete; reset userData/plugins/plugins.sqlite",
+        );
+      }
+    }
+  }
+
+  transaction(callback) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = callback();
+      if (result && typeof result.then === "function") {
+        throw new TypeError("Plugin database transactions must be synchronous");
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+
+  installVersion(record, options = {}) {
+    if (options.enable === true && options.forceDisabled === true) {
+      throw new TypeError("Plugin version cannot be enabled and force-disabled together");
+    }
+    const now = this.clock();
+    const manifestJson = JSON.stringify(record.manifest);
+    const requestedEnabled = options.enable === true ? 1 : 0;
+    const overwriteEnabled = options.enable === true || options.forceDisabled === true;
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO plugins(id, enabled, active_version, installed_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          active_version = excluded.active_version,
+          enabled = CASE WHEN ? THEN excluded.enabled ELSE plugins.enabled END,
+          updated_at = excluded.updated_at
+      `).run(
+        record.pluginId,
+        requestedEnabled,
+        record.version,
+        now,
+        now,
+        overwriteEnabled ? 1 : 0,
+      );
+      this.db.prepare(`
+        INSERT INTO plugin_versions(
+          plugin_id, version, manifest_json, archive_sha256, package_relative_path, installed_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(plugin_id, version) DO UPDATE SET
+          manifest_json = excluded.manifest_json,
+          archive_sha256 = excluded.archive_sha256,
+          package_relative_path = excluded.package_relative_path,
+          installed_at = excluded.installed_at
+      `).run(
+        record.pluginId,
+        record.version,
+        manifestJson,
+        record.archiveSha256,
+        record.packageRelativePath,
+        now,
+      );
+      this.db.prepare(`
+        INSERT INTO plugin_runtime_state(plugin_id, plugin_version, status, updated_at)
+        VALUES (?, ?, 'stopped', ?)
+        ON CONFLICT(plugin_id, plugin_version) DO NOTHING
+      `).run(record.pluginId, record.version, now);
+    });
+  }
+
+  getVersion(pluginId, version) {
+    const row = this.db.prepare(`
+      SELECT plugin_id, version, manifest_json, archive_sha256,
+             package_relative_path, installed_at
+      FROM plugin_versions WHERE plugin_id = ? AND version = ?
+    `).get(pluginId, version);
+    return row ? this.#mapVersion(row) : null;
+  }
+
+  getActivePlugin(pluginId) {
+    const row = this.db.prepare(`
+      SELECT p.id, p.enabled, p.active_version, p.installed_at, p.updated_at,
+             v.manifest_json, v.archive_sha256, v.package_relative_path,
+             r.status, r.runtime_kind, r.last_error, r.quarantined_at
+      FROM plugins p
+      LEFT JOIN plugin_versions v
+        ON v.plugin_id = p.id AND v.version = p.active_version
+      LEFT JOIN plugin_runtime_state r ON r.plugin_id = p.id
+        AND r.plugin_version = p.active_version
+      WHERE p.id = ?
+    `).get(pluginId);
+    return row ? this.#mapPlugin(row) : null;
+  }
+
+  listPlugins() {
+    return this.db.prepare(`
+      SELECT p.id, p.enabled, p.active_version, p.installed_at, p.updated_at,
+             v.manifest_json, v.archive_sha256, v.package_relative_path,
+             r.status, r.runtime_kind, r.last_error, r.quarantined_at
+      FROM plugins p
+      LEFT JOIN plugin_versions v
+        ON v.plugin_id = p.id AND v.version = p.active_version
+      LEFT JOIN plugin_runtime_state r ON r.plugin_id = p.id
+        AND r.plugin_version = p.active_version
+      ORDER BY p.id COLLATE BINARY
+    `).all().map((row) => this.#mapPlugin(row));
+  }
+
+  #mapVersion(row) {
+    return {
+      pluginId: row.plugin_id,
+      version: row.version,
+      manifest: parseJson(row.manifest_json, "manifest"),
+      archiveSha256: row.archive_sha256,
+      packageRelativePath: row.package_relative_path,
+      installedAt: Number(row.installed_at),
+    };
+  }
+
+  #mapPlugin(row) {
+    return {
+      id: row.id,
+      enabled: row.enabled === 1,
+      activeVersion: row.active_version ?? null,
+      installedAt: Number(row.installed_at),
+      updatedAt: Number(row.updated_at),
+      manifest: row.manifest_json ? parseJson(row.manifest_json, "manifest") : null,
+      archiveSha256: row.archive_sha256 ?? null,
+      packageRelativePath: row.package_relative_path ?? null,
+      runtime: {
+        status: row.status ?? "stopped",
+        kind: row.runtime_kind ?? null,
+        lastError: row.last_error ?? null,
+        quarantinedAt: row.quarantined_at == null ? null : Number(row.quarantined_at),
+      },
+    };
+  }
+
+  setEnabled(pluginId, enabled) {
+    const result = this.db.prepare("UPDATE plugins SET enabled = ?, updated_at = ? WHERE id = ?")
+      .run(enabled ? 1 : 0, this.clock(), pluginId);
+    if (Number(result.changes) !== 1) throw new Error(`Plugin is not installed: ${pluginId}`);
+  }
+
+  setActiveVersion(pluginId, version, options = {}) {
+    this.transaction(() => {
+      if (!this.getVersion(pluginId, version)) {
+        throw new Error(`Plugin version is not installed: ${pluginId}@${version}`);
+      }
+      const enabled = options.enabled === true ? 1 : 0;
+      const expectedActiveVersion = options.expectedActiveVersion;
+      const result = expectedActiveVersion === undefined
+        ? this.db.prepare(`
+            UPDATE plugins
+            SET active_version = ?, enabled = ?, updated_at = ?
+            WHERE id = ?
+          `).run(version, enabled, this.clock(), pluginId)
+        : this.db.prepare(`
+            UPDATE plugins
+            SET active_version = ?, enabled = ?, updated_at = ?
+            WHERE id = ? AND active_version = ?
+          `).run(version, enabled, this.clock(), pluginId, expectedActiveVersion);
+      if (Number(result.changes) !== 1) {
+        throw new Error(`Plugin active version changed before it could be restored: ${pluginId}`);
+      }
+    });
+    return this.getActivePlugin(pluginId);
+  }
+
+  setRuntimeState(pluginId, status, options = {}) {
+    const activeVersion = this.db.prepare(
+      "SELECT active_version FROM plugins WHERE id = ?",
+    ).get(pluginId)?.active_version;
+    const pluginVersion = options.pluginVersion ?? activeVersion;
+    if (!pluginVersion) throw new Error(`Plugin is not installed: ${pluginId}`);
+    if (!this.getVersion(pluginId, pluginVersion)) {
+      throw new Error(`Plugin version is not installed: ${pluginId}@${pluginVersion}`);
+    }
+    this.db.prepare(`
+      INSERT INTO plugin_runtime_state(
+        plugin_id, plugin_version, status, runtime_kind,
+        last_error, quarantined_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(plugin_id, plugin_version) DO UPDATE SET
+        status = excluded.status,
+        runtime_kind = excluded.runtime_kind,
+        last_error = excluded.last_error,
+        quarantined_at = COALESCE(excluded.quarantined_at, plugin_runtime_state.quarantined_at),
+        updated_at = excluded.updated_at
+    `).run(
+      pluginId,
+      pluginVersion,
+      status,
+      options.kind ?? null,
+      options.error == null ? null : String(options.error).slice(0, 4_096),
+      options.quarantinedAt ?? null,
+      this.clock(),
+    );
+  }
+
+  recordCrash(pluginId, pluginVersion, windowMs, threshold) {
+    const now = this.clock();
+    return this.transaction(() => {
+      if (!this.getVersion(pluginId, pluginVersion)) {
+        throw new Error(`Plugin version is not installed: ${pluginId}@${pluginVersion}`);
+      }
+      this.db.prepare(`
+        DELETE FROM plugin_crashes
+        WHERE plugin_id = ? AND plugin_version = ? AND crashed_at < ?
+      `).run(pluginId, pluginVersion, now - windowMs);
+      this.db.prepare(`
+        INSERT INTO plugin_crashes(plugin_id, plugin_version, crashed_at)
+        VALUES (?, ?, ?)
+      `).run(pluginId, pluginVersion, now);
+      const count = Number(this.db.prepare(
+        "SELECT COUNT(*) AS count FROM plugin_crashes WHERE plugin_id = ? AND plugin_version = ?",
+      ).get(pluginId, pluginVersion)?.count ?? 0);
+      if (count >= threshold) {
+        this.db.prepare(`
+          UPDATE plugin_runtime_state
+          SET status = 'quarantined', quarantined_at = ?, updated_at = ?
+          WHERE plugin_id = ? AND plugin_version = ?
+        `).run(now, now, pluginId, pluginVersion);
+      }
+      return { count, quarantined: count >= threshold, quarantinedAt: count >= threshold ? now : null };
+    });
+  }
+
+  clearQuarantine(pluginId, pluginVersion) {
+    const now = this.clock();
+    this.transaction(() => {
+      const activeVersion = this.db.prepare(
+        "SELECT active_version FROM plugins WHERE id = ?",
+      ).get(pluginId)?.active_version;
+      const targetVersion = pluginVersion ?? activeVersion;
+      if (!targetVersion) throw new Error(`Plugin is not installed: ${pluginId}`);
+      if (!this.getVersion(pluginId, targetVersion)) {
+        throw new Error(`Plugin version is not installed: ${pluginId}@${targetVersion}`);
+      }
+      this.db.prepare(`
+        DELETE FROM plugin_crashes WHERE plugin_id = ? AND plugin_version = ?
+      `).run(pluginId, targetVersion);
+      this.db.prepare(`
+        UPDATE plugin_runtime_state
+        SET status = 'stopped', last_error = NULL, quarantined_at = NULL, updated_at = ?
+        WHERE plugin_id = ? AND plugin_version = ?
+      `).run(now, pluginId, targetVersion);
+    });
+  }
+
+  removePlugin(pluginId) {
+    this.db.prepare("DELETE FROM plugins WHERE id = ?").run(pluginId);
+  }
+
+  getValue(pluginId, key) {
+    const row = this.db.prepare(
+      "SELECT value_json FROM plugin_kv WHERE plugin_id = ? AND key = ?",
+    ).get(pluginId, key);
+    return row ? parseJson(row.value_json, "key/value entry") : undefined;
+  }
+
+  setValue(pluginId, key, value) {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new TypeError("Plugin storage value must be JSON serializable");
+    this.db.prepare(`
+      INSERT INTO plugin_kv(plugin_id, key, value_json, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(plugin_id, key) DO UPDATE SET
+        value_json = excluded.value_json,
+        updated_at = excluded.updated_at
+    `).run(pluginId, key, serialized, this.clock());
+  }
+
+  deleteValue(pluginId, key) {
+    this.db.prepare("DELETE FROM plugin_kv WHERE plugin_id = ? AND key = ?").run(pluginId, key);
+  }
+
+  listKeys(pluginId) {
+    return this.db.prepare(
+      "SELECT key FROM plugin_kv WHERE plugin_id = ? ORDER BY key COLLATE BINARY",
+    ).all(pluginId).map((row) => row.key);
+  }
+
+  getSetting(pluginId, settingId, scope, scopeId) {
+    const row = this.db.prepare(`
+      SELECT value_json FROM plugin_settings
+      WHERE plugin_id = ? AND setting_id = ? AND scope = ? AND scope_id = ?
+    `).get(pluginId, settingId, scope, scopeId);
+    return row ? parseJson(row.value_json, "setting value") : undefined;
+  }
+
+  setSetting(pluginId, settingId, scope, scopeId, value) {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new TypeError("Plugin setting value must be JSON serializable");
+    this.db.prepare(`
+      INSERT INTO plugin_settings(plugin_id, setting_id, scope, scope_id, value_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(plugin_id, setting_id, scope, scope_id) DO UPDATE SET
+        value_json = excluded.value_json,
+        updated_at = excluded.updated_at
+    `).run(pluginId, settingId, scope, scopeId, serialized, this.clock());
+  }
+
+  deleteSetting(pluginId, settingId, scope, scopeId) {
+    this.db.prepare(`
+      DELETE FROM plugin_settings
+      WHERE plugin_id = ? AND setting_id = ? AND scope = ? AND scope_id = ?
+    `).run(pluginId, settingId, scope, scopeId);
+  }
+
+  listSettings(pluginId) {
+    return this.db.prepare(`
+      SELECT setting_id, scope, scope_id, value_json, updated_at
+      FROM plugin_settings WHERE plugin_id = ?
+      ORDER BY setting_id COLLATE BINARY, scope COLLATE BINARY, scope_id COLLATE BINARY
+    `).all(pluginId).map((row) => ({
+      settingId: row.setting_id,
+      scope: row.scope,
+      scopeId: row.scope_id,
+      value: parseJson(row.value_json, "setting value"),
+      updatedAt: Number(row.updated_at),
+    }));
+  }
+
+  getViewState(pluginId, viewId, scopeId) {
+    const row = this.db.prepare(`
+      SELECT state_json FROM plugin_view_state
+      WHERE plugin_id = ? AND view_id = ? AND scope_id = ?
+    `).get(pluginId, viewId, scopeId);
+    return row ? parseJson(row.state_json, "view state") : undefined;
+  }
+
+  setViewState(pluginId, viewId, scopeId, state) {
+    const serialized = JSON.stringify(state);
+    if (serialized === undefined) throw new TypeError("Plugin view state must be JSON serializable");
+    this.db.prepare(`
+      INSERT INTO plugin_view_state(plugin_id, view_id, scope_id, state_json, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(plugin_id, view_id, scope_id) DO UPDATE SET
+        state_json = excluded.state_json,
+        updated_at = excluded.updated_at
+    `).run(pluginId, viewId, scopeId, serialized, this.clock());
+  }
+
+  deleteViewState(pluginId, viewId, scopeId) {
+    this.db.prepare(`
+      DELETE FROM plugin_view_state
+      WHERE plugin_id = ? AND view_id = ? AND scope_id = ?
+    `).run(pluginId, viewId, scopeId);
+  }
+
+  listPermissionGrants(pluginId) {
+    return this.db.prepare(`
+      SELECT plugin_id, permission, resource, resource_kind, declaration_hash, granted_at
+      FROM plugin_permission_grants
+      WHERE plugin_id = ?
+      ORDER BY permission COLLATE BINARY, resource COLLATE BINARY
+    `).all(pluginId).map((row) => ({
+      pluginId: row.plugin_id,
+      permission: row.permission,
+      resource: row.resource,
+      resourceKind: row.resource_kind,
+      declarationHash: row.declaration_hash,
+      grantedAt: Number(row.granted_at),
+    }));
+  }
+
+  upsertPermissionGrant(record) {
+    this.db.prepare(`
+      INSERT INTO plugin_permission_grants(
+        plugin_id, permission, resource, resource_kind, declaration_hash, granted_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(plugin_id, permission, resource) DO UPDATE SET
+        resource_kind = excluded.resource_kind,
+        declaration_hash = excluded.declaration_hash,
+        granted_at = excluded.granted_at
+    `).run(
+      record.pluginId,
+      record.permission,
+      record.resource,
+      record.resourceKind,
+      record.declarationHash,
+      this.clock(),
+    );
+  }
+
+  deletePermissionGrant(pluginId, permission, resource) {
+    this.db.prepare(`
+      DELETE FROM plugin_permission_grants
+      WHERE plugin_id = ? AND permission = ? AND resource = ?
+    `).run(pluginId, permission, resource);
+  }
+
+  deleteAllPermissionGrants(pluginId) {
+    this.db.prepare("DELETE FROM plugin_permission_grants WHERE plugin_id = ?").run(pluginId);
+  }
+
+  getSecretByKey(pluginId, key) {
+    const row = this.db.prepare(`
+      SELECT plugin_id, key, secret_ref, ciphertext, created_at, updated_at
+      FROM plugin_secrets WHERE plugin_id = ? AND key = ?
+    `).get(pluginId, key);
+    return row ? this.#mapSecret(row) : null;
+  }
+
+  getSecretByRef(pluginId, secretRef) {
+    const row = this.db.prepare(`
+      SELECT plugin_id, key, secret_ref, ciphertext, created_at, updated_at
+      FROM plugin_secrets WHERE plugin_id = ? AND secret_ref = ?
+    `).get(pluginId, secretRef);
+    return row ? this.#mapSecret(row) : null;
+  }
+
+  #mapSecret(row) {
+    return {
+      pluginId: row.plugin_id,
+      key: row.key,
+      secretRef: row.secret_ref,
+      ciphertext: Buffer.from(row.ciphertext),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  upsertSecret(record) {
+    const now = this.clock();
+    this.db.prepare(`
+      INSERT INTO plugin_secrets(
+        plugin_id, key, secret_ref, ciphertext, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(plugin_id, key) DO UPDATE SET
+        secret_ref = excluded.secret_ref,
+        ciphertext = excluded.ciphertext,
+        updated_at = excluded.updated_at
+    `).run(
+      record.pluginId,
+      record.key,
+      record.secretRef,
+      record.ciphertext,
+      now,
+      now,
+    );
+  }
+
+  deleteSecret(pluginId, key) {
+    this.db.prepare("DELETE FROM plugin_secrets WHERE plugin_id = ? AND key = ?")
+      .run(pluginId, key);
+  }
+
+  recordSecurityAudit(pluginId, event, details) {
+    let detailsJson = JSON.stringify(details ?? {});
+    const originalBytes = Buffer.byteLength(detailsJson);
+    if (originalBytes > MAX_SECURITY_AUDIT_DETAILS_BYTES) {
+      detailsJson = JSON.stringify({
+        truncated: true,
+        originalBytes,
+        sha256: createHash("sha256").update(detailsJson).digest("hex"),
+      });
+    }
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO plugin_security_audit(plugin_id, event, details_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(pluginId, event, detailsJson, this.clock());
+      this.db.prepare(`
+        DELETE FROM plugin_security_audit
+        WHERE plugin_id = ? AND id NOT IN (
+          SELECT id FROM plugin_security_audit
+          WHERE plugin_id = ? ORDER BY id DESC LIMIT ${MAX_SECURITY_AUDIT_RECORDS_PER_PLUGIN}
+        )
+      `).run(pluginId, pluginId);
+    });
+  }
+
+  listSecurityAudit(pluginId, limit = 100) {
+    const requestedLimit = Number(limit);
+    const normalizedLimit = Math.max(1, Math.min(
+      1_000,
+      Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : 100,
+    ));
+    return this.db.prepare(`
+      SELECT event, details_json, created_at
+      FROM plugin_security_audit
+      WHERE plugin_id = ? ORDER BY id DESC LIMIT ?
+    `).all(pluginId, normalizedLimit).map((row) => ({
+      event: row.event,
+      details: parseJson(row.details_json, "security audit entry"),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  close() {
+    this.db.close();
+  }
+}
+
+module.exports = {
+  MAX_SECURITY_AUDIT_DETAILS_BYTES,
+  MAX_SECURITY_AUDIT_RECORDS_PER_PLUGIN,
+  PluginDatabase,
+  REQUIRED_SCHEMA_COLUMNS,
+  SCHEMA_VERSION,
+};

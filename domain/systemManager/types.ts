@@ -119,7 +119,7 @@ export type DockerImageManageAction =
   | { action: 'prune'; all?: boolean }
   | { action: 'tag'; imageId: string; repository: string; tag?: string };
 
-export type SystemManagerSubTab = 'processes' | 'tmux' | 'docker';
+export type SystemManagerSubTab = 'overview' | 'processes' | 'tmux' | 'docker';
 
 export interface TerminalPopupIcon {
   kind: 'image';
@@ -136,4 +136,11 @@ export interface TerminalPopupPayload {
   sourceSession: import('../../types').TerminalSession;
   startupCommand: string;
   localShellType?: import('../../types').TerminalSession['shellType'];
+  /**
+   * When set, the popup attaches to this already-running backend session
+   * (same PTY) instead of starting a new shell. Used for AI silent sessions.
+   */
+  attachSessionId?: string;
+  /** Ephemeral main-process grant bound to the attach popup window. */
+  attachAuthorization?: string;
 }

@@ -13,6 +13,7 @@ import type {
   AIPermissionMode,
   AIProviderId,
   AIToolIntegrationMode,
+  CursorAuthMode,
   ExternalAgentConfig,
   ProviderConfig,
   WebSearchConfig,
@@ -21,6 +22,7 @@ import type { ManagedAgentKey } from "../../../infrastructure/ai/managedAgents";
 import { PROVIDER_PRESETS } from "../../../infrastructure/ai/types";
 import { useI18n } from "../../../application/i18n/I18nProvider";
 import { Button } from "../../ui/button";
+import { ConfirmDialog } from "../../ui/confirm-dialog";
 import { Select, SettingCard, SettingsSection, SettingsTabContent, SettingRow, Toggle } from "../settings-ui";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../ui/tabs";
 import { AgentIconBadge } from "../../ai/AgentIconBadge";
@@ -29,12 +31,14 @@ import { notifyUserSkillsStatusChanged } from "../../ai/userSkillsStatusEvents";
 
 import type {
   AgentPathInfo,
+  CodexAppServerStatus,
   CodexIntegrationStatus,
   CodexLoginSession,
   UserSkillsStatusResult,
 } from "./ai/types";
 import {
   getBridge,
+  isCursorAvailableForMode,
   normalizeCodexBridgeError,
 } from "./ai/types";
 import { ProviderCard } from "./ai/ProviderCard";
@@ -44,6 +48,7 @@ import { ClaudeCodeCard } from "./ai/ClaudeCodeCard";
 import { CopilotCliCard } from "./ai/CopilotCliCard";
 import { CodebuddyCard } from "./ai/CodebuddyCard";
 import { SafetySettings } from "./ai/SafetySettings";
+import { ExternalMcpCard } from "./ai/ExternalMcpCard";
 import { PermissionGrantsSettings } from "./ai/PermissionGrantsSettings";
 import { useAIPermissionGrantsState } from "../../../application/state/useAIPermissionGrantsState";
 import { WebSearchSettings } from "./ai/WebSearchSettings";
@@ -199,10 +204,12 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
   } = useAIPermissionGrantsState();
   const { t } = useI18n();
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [removeProviderConfirm, setRemoveProviderConfirm] = useState<{ id: string; name: string } | null>(null);
   const [codexIntegration, setCodexIntegration] = useState<CodexIntegrationStatus | null>(null);
   const [codexLoginSession, setCodexLoginSession] = useState<CodexLoginSession | null>(null);
   const [isCodexLoading, setIsCodexLoading] = useState(false);
   const [codexError, setCodexError] = useState<string | null>(null);
+  const [codexAppServerStatus, setCodexAppServerStatus] = useState<CodexAppServerStatus | null>(null);
   const initialManagedPathsRef = useRef<{
     codex: string;
     claude: string;
@@ -298,6 +305,9 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     [externalAgents],
   );
   const cursorApiKeyEncrypted = cursorManagedAgent?.apiKey;
+  const cursorAuthMode: CursorAuthMode = cursorManagedAgent?.cursorAuthMode === "cli-login"
+    ? "cli-login"
+    : "api-key";
 
   // Ref to read current defaultAgentId without adding it as a dependency.
   const defaultAgentIdRef = useRef(defaultAgentId);
@@ -386,7 +396,13 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
         command: agentKey,
         customPath: customPath.trim(),
         refreshShellEnv: Boolean(options?.refreshShellEnv),
-        ...(agentKey === "cursor" ? { apiKeyPresent: Boolean(options?.apiKeyPresent ?? cursorApiKeyEncrypted) } : {}),
+        ...(agentKey === "cursor" ? {
+        // Always report stored key presence so discovery can set apiKeyOk even
+        // while the user is in CLI-login mode (mode is separate from capability).
+        apiKeyPresent: (options?.apiKeyPresent !== undefined
+          ? Boolean(options.apiKeyPresent)
+          : Boolean(cursorApiKeyEncrypted)),
+      } : {}),
       });
       if (!isCurrentRequest()) return null;
       if (
@@ -459,7 +475,7 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     return () => {
       for (const cancel of cancelTasks) cancel();
     };
-  }, [activeSubTab, cursorApiKeyEncrypted, resolveAgentPath]);
+  }, [activeSubTab, cursorApiKeyEncrypted, cursorAuthMode, resolveAgentPath]);
 
   const handleSaveCursorApiKey = useCallback(async (apiKey: string) => {
     const trimmed = apiKey.trim();
@@ -470,6 +486,9 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
       const others = prev.filter((agent) => agent.id !== "discovered_cursor");
       if (!encrypted && !existing) return prev;
       if (!encrypted && existing && !result?.available) return others;
+      const modeAvailable = isCursorAvailableForMode(result, "api-key", {
+        hasStoredApiKey: Boolean(encrypted),
+      });
       const nextAgent: ExternalAgentConfig = {
         ...(existing ?? {
           id: "discovered_cursor",
@@ -481,13 +500,50 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
           enabled: false,
         }),
         apiKey: encrypted,
+        cursorAuthMode: "api-key",
         command: result?.path || existing?.command || cursorPathInfo?.path || "cursor",
-        available: Boolean(result?.available),
-        enabled: result?.available ? (existing?.enabled ?? true) : false,
+        available: modeAvailable,
+        // Preserve enable preference; available alone gates send for this mode.
+        enabled: existing?.enabled ?? true,
       };
       return [...others, nextAgent];
     });
   }, [cursorPathInfo?.path, resolveAgentPath, setExternalAgents]);
+
+  const handleCursorAuthModeChange = useCallback((mode: CursorAuthMode) => {
+    setExternalAgents((prev) => {
+      const existing = prev.find((agent) => agent.id === "discovered_cursor");
+      const others = prev.filter((agent) => agent.id !== "discovered_cursor");
+      const nextAgent: ExternalAgentConfig = {
+        ...(existing ?? {
+          id: "discovered_cursor",
+          name: "Cursor",
+          command: cursorPathInfo?.path || "cursor",
+          args: ["{prompt}"],
+          icon: "cursor",
+          sdkBackend: "cursor",
+          enabled: false,
+        }),
+        cursorAuthMode: mode,
+        // Keep stored API key when switching modes; turn wiring omits
+        // CURSOR_API_KEY for cli-login without destroying credentials.
+        command: mode === "cli-login"
+          ? (cursorPathInfo?.cliBinPath || cursorPathInfo?.path || existing?.command || "cursor")
+          : (existing?.command || cursorPathInfo?.path || "cursor"),
+        available: isCursorAvailableForMode(cursorPathInfo, mode, {
+          hasStoredApiKey: Boolean(existing?.apiKey || cursorApiKeyEncrypted),
+        }),
+        // Preserve user enable preference across mode peeks; `available` alone
+        // gates send eligibility when the mode cannot run.
+        enabled: existing?.enabled ?? true,
+      };
+      return [...others, nextAgent];
+    });
+    void resolveAgentPath("cursor", "", {
+      // Always report stored key presence for discovery fields; mode is separate.
+      apiKeyPresent: Boolean(cursorApiKeyEncrypted),
+    });
+  }, [cursorApiKeyEncrypted, cursorPathInfo, resolveAgentPath, setExternalAgents]);
 
   // Add a new provider from preset
   const handleAddProvider = useCallback(
@@ -512,16 +568,22 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     (id: string) => {
       const provider = providers.find((p) => p.id === id);
       const name = provider?.name || id;
-      const ok = window.confirm(
-        t('confirm.removeProvider', { name }),
-      );
-      if (!ok) return;
+      setRemoveProviderConfirm({ id, name });
+    },
+    [providers],
+  );
+
+  const handleConfirmRemoveProvider = useCallback(
+    () => {
+      if (!removeProviderConfirm) return;
+      const { id } = removeProviderConfirm;
       removeProvider(id);
       if (editingProviderId === id) {
         setEditingProviderId(null);
       }
+      setRemoveProviderConfirm(null);
     },
-    [removeProvider, editingProviderId, providers, t],
+    [removeProvider, editingProviderId, removeProviderConfirm],
   );
 
   // Agent options for default agent
@@ -583,6 +645,39 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     codexCommittedPath
   ), [codexCommittedPath]);
 
+  const codexManagedAgent = useMemo(
+    () => externalAgents.find((agent) => agent.id === "discovered_codex"),
+    [externalAgents],
+  );
+  const codexRuntime = codexManagedAgent?.codexRuntime ?? 'sdk';
+
+  const refreshCodexAppServerStatus = useCallback(async () => {
+    const bridge = getBridge();
+    if (!bridge?.codexAppServerGetStatus || !codexCommittedPath) {
+      setCodexAppServerStatus(null);
+      return;
+    }
+    setCodexAppServerStatus({ available: false, checking: true });
+    try {
+      const result = await bridge.codexAppServerGetStatus(codexCommittedPath, codexManagedAgent?.env);
+      setCodexAppServerStatus({
+        available: result?.available === true,
+        error: result?.available ? undefined : result?.error,
+      });
+    } catch (error) {
+      setCodexAppServerStatus({
+        available: false,
+        error: normalizeCodexBridgeError(error),
+      });
+    }
+  }, [codexCommittedPath, codexManagedAgent?.env]);
+
+  const handleCodexRuntimeChange = useCallback((runtime: 'sdk' | 'app-server') => {
+    setExternalAgents((agents) => agents.map((agent) => (
+      agent.id === "discovered_codex" ? { ...agent, codexRuntime: runtime } : agent
+    )));
+  }, [setExternalAgents]);
+
   // Validate a custom path for an agent.
   const handleCheckCustomPath = useCallback(async (agentKey: ManagedAgentKey) => {
     const customPath = agentKey === "codex"
@@ -625,7 +720,9 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     const result = await resolveAgentPath(agentKey, "", {
       refreshShellEnv: true,
       commandSource: "auto",
-      ...(agentKey === "cursor" ? { apiKeyPresent: Boolean(cursorApiKeyEncrypted) } : {}),
+      ...(agentKey === "cursor" ? {
+        apiKeyPresent: Boolean(cursorApiKeyEncrypted),
+      } : {}),
     });
     if (agentKey === "codex") {
       await refreshCodexIntegration({
@@ -644,6 +741,13 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
       void refreshCodexIntegration({ codexPath: getCodexPathOverride() });
     }, 620);
   }, [activeSubTab, getCodexPathOverride, refreshCodexIntegration]);
+
+  useEffect(() => {
+    if (activeSubTab !== "agents" || !codexPathInfo?.available) return;
+    return scheduleAfterFirstPaint(() => {
+      void refreshCodexAppServerStatus();
+    }, 760);
+  }, [activeSubTab, codexPathInfo?.available, refreshCodexAppServerStatus]);
 
   useEffect(() => {
     if (!codexLoginSession || codexLoginSession.state !== "running") {
@@ -913,6 +1017,9 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
               onCancel={() => void handleCancelCodexLogin()}
               onOpenUrl={handleOpenCodexLoginUrl}
               onLogout={() => void handleCodexLogout()}
+              appServerRuntime={codexRuntime}
+              appServerStatus={codexAppServerStatus}
+              onAppServerRuntimeChange={handleCodexRuntimeChange}
             />
           </SettingsSection>
 
@@ -958,6 +1065,8 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
               pathInfo={cursorPathInfo}
               isResolvingPath={isResolvingCursor}
               encryptedApiKey={cursorApiKeyEncrypted}
+              authMode={cursorAuthMode}
+              onAuthModeChange={handleCursorAuthModeChange}
               onSaveApiKey={handleSaveCursorApiKey}
               onRecheckPath={() => void handleCheckCustomPath("cursor")}
             />
@@ -1042,6 +1151,10 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
                 />
               </SettingRow>
             </SettingCard>
+          </SettingsSection>
+
+          <SettingsSection title={t('ai.externalMcp.title')}>
+            <ExternalMcpCard />
           </SettingsSection>
 
           <SettingsSection
@@ -1173,6 +1286,16 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
           />
         </TabsContent>
       </Tabs>
+      <ConfirmDialog
+        open={removeProviderConfirm !== null}
+        title={removeProviderConfirm ? t('confirm.removeProvider', { name: removeProviderConfirm.name }) : ''}
+        confirmLabel={t('action.remove')}
+        destructive
+        onOpenChange={(open) => {
+          if (!open) setRemoveProviderConfirm(null);
+        }}
+        onConfirm={handleConfirmRemoveProvider}
+      />
     </SettingsTabContent>
   );
 };

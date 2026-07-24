@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const { readFileSync } = require("node:fs");
 const Module = require("node:module");
 
 const passphraseHandler = require("./passphraseHandler.cjs");
@@ -66,6 +67,22 @@ function createSender() {
     send: () => {},
   };
 }
+
+test("openSftp clears its authentication timer when SSH becomes ready", () => {
+  const source = readFileSync(require.resolve("./sftpBridge/openConnection.cjs"), "utf8");
+  assert.match(
+    source,
+    /sshClient\.once\('ready', \(\) => \{\s*clearAuthReadyTimer\(\);\s*cleanup\(\);/,
+  );
+});
+
+test("openSftp forwards target hostId to keyboard-interactive prompts", () => {
+  const source = readFileSync(require.resolve("./sftpBridge/openConnection.cjs"), "utf8");
+  assert.match(
+    source,
+    /const kiHandler = createKeyboardInteractiveHandler\(\{\s*sender: event\.sender,\s*sessionId: connId,\s*hostId: options\.hostId,/,
+  );
+});
 
 test("openSftp cleans an opened proxy socket when target key passphrase is cancelled", async (t) => {
   const originalRequestPassphrase = passphraseHandler.requestPassphrase;
@@ -198,4 +215,45 @@ test("openSftpForSession holds a shared SSH connection until the SFTP handle clo
 
   assert.equal(fakeSftp.ended, true);
   assert.equal(conn.ended, true);
+});
+
+test("openSftpForSession honors session.sftpFileProtocol when payload omits fileProtocol", async () => {
+  const bridge = loadSftpBridgeWithProxySocket(null);
+  const sftpClients = new Map();
+  let sftpCalls = 0;
+  const fakeSftp = {
+    ended: false,
+    readdir: () => {},
+    stat: () => {},
+    mkdir: () => {},
+    unlink: () => {},
+    end() {
+      this.ended = true;
+    },
+  };
+  const conn = {
+    ended: false,
+    sftp(cb) {
+      sftpCalls += 1;
+      cb(null, fakeSftp);
+    },
+    end() {
+      this.ended = true;
+    },
+  };
+  // Forced SFTP: session preference must prevent SCP fallback even without payload.fileProtocol
+  const session = {
+    conn,
+    stream: {},
+    sftpFileProtocol: "sftp",
+  };
+  const sessions = new Map([["session-proto", session]]);
+  bridge.init({ sftpClients, sessions, electronModule: {} });
+
+  const opened = await bridge.openSftpForSession(null, { sessionId: "session-proto" });
+  assert.equal(opened.ok, true);
+  assert.equal(opened.fileProtocol, "sftp");
+  assert.equal(sftpCalls, 1);
+  assert.equal(sftpClients.get(opened.sftpId)?.__netcattyFileProtocol, "sftp");
+  await bridge.closeSftp(null, { sftpId: opened.sftpId });
 });

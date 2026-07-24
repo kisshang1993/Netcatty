@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState, useMemo } from "react"
 import { AlertCircle, Import, Minus, Palette, Pencil, Plus, Trash2 } from "lucide-react";
 import type {
   CursorShape,
+  PasswordPromptAssistMode,
   TerminalEmulationType,
   TerminalSettings,
 } from "../../../domain/models";
@@ -511,11 +512,12 @@ function SettingsTerminalTab(props: {
         <SettingRow
           label={t("settings.terminal.font.cjk")}
           description={t("settings.terminal.font.cjk.desc")}
+          align="start"
         >
           <TerminalCjkFontSelect
             value={terminalSettings.fallbackFont ?? ""}
             onChange={(next) => updateTerminalSetting("fallbackFont", next)}
-            className="w-48"
+            className="w-72"
           />
         </SettingRow>
 
@@ -648,6 +650,15 @@ function SettingsTerminalTab(props: {
           description={t("settings.terminal.keyboard.optionArrowWordJump.desc")}
         >
           <Toggle checked={terminalSettings.optionArrowWordJump} onChange={(v) => updateTerminalSetting("optionArrowWordJump", v)} />
+        </SettingRow>
+        <SettingRow
+          label={t("settings.terminal.keyboard.kittyProtocol")}
+          description={t("settings.terminal.keyboard.kittyProtocol.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.kittyKeyboardProtocolEnabled}
+            onChange={(v) => updateTerminalSetting("kittyKeyboardProtocolEnabled", v)}
+          />
         </SettingRow>
       </div>
 
@@ -830,6 +841,15 @@ function SettingsTerminalTab(props: {
           />
         </SettingRow>
         <SettingRow
+          label={t("settings.terminal.connection.sshAutoReconnectEnabled")}
+          description={t("settings.terminal.connection.sshAutoReconnectEnabled.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.sshAutoReconnectEnabled}
+            onChange={(v) => updateTerminalSetting("sshAutoReconnectEnabled", v)}
+          />
+        </SettingRow>
+        <SettingRow
           label={t("settings.terminal.connection.keepaliveInterval")}
           description={t("settings.terminal.connection.keepaliveInterval.desc")}
         >
@@ -880,6 +900,15 @@ function SettingsTerminalTab(props: {
 
       <SectionHeader title={t("settings.terminal.section.serverStats")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          label={t("settings.terminal.hostInfoBar.show")}
+          description={t("settings.terminal.hostInfoBar.show.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.showHostInfoBar}
+            onChange={(v) => updateTerminalSetting("showHostInfoBar", v)}
+          />
+        </SettingRow>
         <SettingRow
           label={t("settings.terminal.serverStats.show")}
           description={t("settings.terminal.serverStats.show.desc")}
@@ -1158,6 +1187,27 @@ function SettingsTerminalTab(props: {
             checked={terminalSettings.autocompletePopupMenu}
             onChange={handleAutocompletePopupMenuChange}
             disabled={!terminalSettings.autocompleteEnabled}
+          />
+        </SettingRow>
+      </div>
+
+      <SectionHeader title={t("settings.terminal.section.passwordPromptAssist")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          label={t("settings.terminal.passwordPromptAssist.mode")}
+          description={t("settings.terminal.passwordPromptAssist.mode.desc")}
+        >
+          <Select
+            value={terminalSettings.passwordPromptAssist ?? "hint"}
+            onChange={(v) =>
+              updateTerminalSetting("passwordPromptAssist", v as PasswordPromptAssistMode)
+            }
+            options={[
+              { value: "off", label: t("settings.terminal.passwordPromptAssist.off") },
+              { value: "hint", label: t("settings.terminal.passwordPromptAssist.hint") },
+              { value: "picker", label: t("settings.terminal.passwordPromptAssist.picker") },
+            ]}
+            className="w-48"
           />
         </SettingRow>
       </div>

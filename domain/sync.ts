@@ -6,6 +6,17 @@
  */
 
 import type { ShrinkFinding } from './syncGuards';
+import type {
+  ConvergentFieldConflict,
+  ConvergentSyncEnvelopeV2,
+  ConvergentSyncStateV2,
+} from './convergentSync';
+
+export type {
+  ConvergentFieldConflict,
+  ConvergentSyncEnvelopeV2,
+  ConvergentSyncStateV2,
+} from './convergentSync';
 
 // ============================================================================
 // Security State Machine
@@ -68,6 +79,7 @@ export interface S3Config {
   sessionToken?: string;
   prefix?: string;
   forcePathStyle?: boolean;
+  allowInsecure?: boolean;
 }
 
 /**
@@ -177,6 +189,8 @@ export interface SyncFileMeta {
   algorithm: 'AES-256-GCM'; // Encryption algorithm identifier
   kdf: 'PBKDF2' | 'Argon2id'; // Key derivation function
   kdfIterations?: number;   // PBKDF2 iterations (if applicable)
+  /** Present only for convergent-sync payloads. Unknown future versions fail closed. */
+  syncSchemaVersion?: 2;
 }
 
 /**
@@ -249,6 +263,8 @@ export interface SyncPayload {
     sftpGlobalBookmarks?: import('./models').SftpBookmark[];
     // Vault: show recently connected hosts
     showRecentHosts?: boolean;
+    // Vault: host click activates immediately, or select-then-click-again
+    hostClickBehavior?: 'connect' | 'select';
     // Vault: root list shows only ungrouped hosts
     showOnlyUngroupedHostsInRoot?: boolean;
     // Top tabs: show standalone SFTP view tab
@@ -288,6 +304,9 @@ export interface SyncPayload {
 
   // Reliability metadata used to make sync decisions auditable across devices.
   syncMeta?: SyncReliabilityMeta;
+
+  /** Encrypted convergent-sync metadata. The adjacent fields remain a complete v1 snapshot. */
+  convergentSync?: ConvergentSyncEnvelopeV2;
 }
 
 export const SYNC_PAYLOAD_ENTITY_KEYS = [
@@ -371,6 +390,44 @@ export interface SyncSnapshotEntry {
   payload: SyncPayload;
 }
 
+export interface ConvergentProviderMigrationStatus {
+  provider: CloudProvider;
+  status: 'ready' | 'empty' | 'unavailable' | 'blocked';
+  schemaVersion: 1 | 2 | 'future' | 'invalid';
+  entityCount: number;
+  hasTrustedBaseline: boolean;
+  message?: string;
+}
+
+export interface ConvergentMigrationPreview {
+  schemaVersion: 2;
+  canInitialize: boolean;
+  entityCounts: Partial<Record<CloudSyncPayloadEntityKey, number>>;
+  settingsLeafCount: number;
+  conflictCount: number;
+  conflicts: ConvergentFieldConflict[];
+  shrinkFindings: Array<{ provider: CloudProvider; finding: Extract<ShrinkFinding, { suspicious: true }> }>;
+  providers: ConvergentProviderMigrationStatus[];
+  oldClientCompatibility: 'materialized-v1-snapshot';
+  blockedReasons: string[];
+}
+
+export interface ConvergentReplicaRecordV2 {
+  schemaVersion: 2;
+  state: ConvergentSyncStateV2;
+  updatedAt: number;
+}
+
+export interface ConvergentProviderBaselineV2 {
+  schemaVersion: 2;
+  provider: CloudProvider;
+  remoteVersion: number;
+  remoteUpdatedAt: number;
+  remoteDeviceId: string;
+  materializedPayload: SyncPayload;
+  state: ConvergentSyncStateV2;
+}
+
 export function hasSyncPayloadEntityData(
   payload: SyncPayload,
   keys: readonly SyncPayloadEntityKey[] = SYNC_PAYLOAD_ENTITY_KEYS,
@@ -449,12 +506,18 @@ export interface SyncResult {
   conflictDetected?: boolean;
   /** Present when sync produced or selected a payload that caller should apply locally */
   mergedPayload?: import('./sync').SyncPayload;
+  /** True when convergent sync already applied mergedPayload and committed its replica atomically. */
+  mergedPayloadApplied?: boolean;
   /** Present with a downloaded payload so callers can commit the remote anchor after local apply succeeds. */
   remoteFile?: SyncedFile;
   /** True when a shrink-detection guard blocked the upload */
   shrinkBlocked?: boolean;
   /** The finding that triggered the shrink block or force-push */
   finding?: ShrinkFinding;
+  /** Field-level conflicts retained by convergent sync v2. */
+  convergentConflicts?: ConvergentFieldConflict[];
+  /** Number of retained v2 conflicts; duplicated for lightweight status views. */
+  convergentConflictCount?: number;
 }
 
 export interface RemoteSyncPayload {
@@ -563,6 +626,8 @@ export const SYNC_STORAGE_KEYS = {
   PROVIDER_SMB: 'netcatty_provider_smb_v1',
   LOCAL_SYNC_META: 'netcatty_local_sync_meta_v1',
   SYNC_BASE_PAYLOAD: 'netcatty_sync_base_payload_v1',
+  CONVERGENT_REPLICA: 'netcatty_convergent_sync_replica_v2',
+  CONVERGENT_PROVIDER_BASELINE: 'netcatty_convergent_sync_provider_baseline_v2',
 } as const;
 
 // ============================================================================

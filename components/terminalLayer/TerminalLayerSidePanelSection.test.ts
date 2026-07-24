@@ -51,7 +51,16 @@ test('closed side panel shell has no width', () => {
 
 test('side panel tab order falls back to the default order', () => {
   assert.deepEqual(normalizeTerminalSidePanelTabOrder(null), TERMINAL_SIDE_PANEL_TAB_DEFAULT_ORDER);
-  assert.deepEqual(normalizeTerminalSidePanelTabOrder(['scripts', 'bad-tab']), TERMINAL_SIDE_PANEL_TAB_DEFAULT_ORDER);
+  // Partial / dirty lists keep known ids in order and append the rest of the defaults.
+  assert.deepEqual(normalizeTerminalSidePanelTabOrder(['scripts', 'bad-tab']), [
+    'scripts',
+    'sftp',
+    'history',
+    'theme',
+    'system',
+    'notes',
+    'ai',
+  ]);
 });
 
 test('side panel tab order accepts a stored permutation', () => {
@@ -92,6 +101,15 @@ test('notes side panel forwards repeated open-note requests', () => {
   assert.match(slotsSource, /openNoteRequestId=\{openNoteRequest\?\.requestId \?\? null\}/);
 });
 
+test('system monitoring only pauses for hidden remote tabs when hibernation is enabled', () => {
+  const source = readFileSync(new URL('./terminalLayerSidePanelSlots.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /const systemSession = resolveSystemSidebarSession\(/);
+  assert.match(source, /shouldKeepTerminalBackgroundWorkActive\([\s\S]*systemHost\?\.protocol,[\s\S]*isTabActive/);
+  assert.doesNotMatch(source, /useSidePanelLiveSnapshotForTab\(tabId, keepSystemWorkActive\)/);
+  assert.match(source, /isVisible=\{keepSystemWorkActive\}/);
+});
+
 test('side panel tab bar and borders use inline resolved terminal theme colors', () => {
   const sectionSource = readFileSync(new URL('./TerminalLayerSidePanelSection.tsx', import.meta.url), 'utf8');
 
@@ -101,4 +119,11 @@ test('side panel tab bar and borders use inline resolved terminal theme colors',
   assert.match(sectionSource, /borderLeft: `1px solid \$\{sidePanelTheme\.separator\}`/);
   assert.doesNotMatch(sectionSource, /terminalAppearanceSidePanelStyle/);
   assert.doesNotMatch(sectionSource, /var\(--terminal-sidepanel-border\)/);
+});
+
+test('side panel content scopes app color utilities to the resolved terminal theme', () => {
+  const sectionSource = readFileSync(new URL('./TerminalLayerSidePanelSection.tsx', import.meta.url), 'utf8');
+
+  assert.match(sectionSource, /buildTerminalSidePanelCssVars/);
+  assert.match(sectionSource, /\.\.\.sidePanelCssVars/);
 });

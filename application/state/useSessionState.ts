@@ -1,7 +1,12 @@
 import { MouseEvent,useCallback,useEffect,useMemo,useRef,useState } from 'react';
 import { ConnectionLog,Host,SerialConfig,Snippet,TerminalSession,Workspace,WorkspaceViewMode } from '../../domain/models';
 import { addLogView, getLogViewTabId, removeLogView, type LogView } from './logViewState';
-import { createHostTerminalSession, createLocalTerminalSession, createSerialTerminalSession, type LocalTerminalOptions } from './sessionFactories';
+import {
+  createHostTerminalSession,
+  createLocalTerminalSession,
+  createSerialTerminalSession,
+  type LocalTerminalOptions,
+} from './sessionFactories';
 import { isScriptSnippet } from '../../domain/snippetScript.ts';
 import {
 appendPaneToWorkspaceRoot,
@@ -11,7 +16,6 @@ createWorkspaceFromSessionIds,
 FocusDirection,
 getNextFocusSessionId,
 insertPaneIntoWorkspace,
-pruneWorkspaceNode,
 reorderWorkspaceFocusSessionOrder,
 SplitDirection,
 SplitHint,
@@ -21,7 +25,7 @@ import { clearSessionFontSizeOverride as clearSessionFontSizeOverrideFields } fr
 import { buildOrderedWorkTabIds, reorderWorkTabIds } from '../app/workTabSurface';
 import { activeTabStore } from './activeTabStore';
 import {
-  closeSessionWorkspaceLayoutState,
+  closeSessionsState,
   detachSessionFromWorkspaceState,
   replaceDissolvedWorkspaceTabOrder,
 } from './sessionWorkspaceDetach';
@@ -45,6 +49,7 @@ import {
 import { resolveRestorePreviousSessionSetting } from './sessionRestoreSettings';
 import type { CodingCliProviderId } from '../../domain/codingCliProviders';
 import { normalizeCodingCliDynamicTitleForStorage } from '../../domain/codingCliTitleParse';
+import { cleanupClosedTerminalSessions } from './aiStateSnapshots';
 
 export function addWorkspaceIfMissing(
   workspaces: Workspace[],
@@ -345,10 +350,12 @@ export const useSessionState = ({
     return sessionId;
   }, [setActiveTabId]);
 
-  const connectToHost = useCallback((host: Host) => {
+  const connectToHost = useCallback((host: Host, options?: { hidden?: boolean }) => {
+    const hidden = options?.hidden === true;
     const newSession = createHostTerminalSession(crypto.randomUUID(), host);
-    setSessions(prev => [...prev, newSession]);
-    setActiveTabId(newSession.id);
+    const sessionToAdd = hidden ? { ...newSession, hiddenFromTabs: true } : newSession;
+    setSessions(prev => [...prev, sessionToAdd]);
+    if (!hidden) setActiveTabId(newSession.id);
     return newSession.id;
   }, [setActiveTabId]);
 
@@ -369,6 +376,9 @@ export const useSessionState = ({
   }, []);
 
   const closeWorkspace = useCallback((workspaceId: string) => {
+    cleanupClosedTerminalSessions(
+      sessionsRef.current.filter(session => session.workspaceId === workspaceId).map(session => session.id),
+    );
     setWorkspaces(prevWorkspaces => {
       const remainingWorkspaces = prevWorkspaces.filter(w => w.id !== workspaceId);
 
@@ -387,88 +397,28 @@ export const useSessionState = ({
     });
   }, [setActiveTabId]);
 
-  const closeSession = useCallback((sessionId: string, e?: MouseEvent) => {
-    e?.stopPropagation();
-
-    // Pre-compute outside the setSessions updater so we don't depend on React
-    // having run the updater by the time we queue the microtask. React 18+ does
-    // not guarantee updater execution timing under concurrent scheduling.
-    const sessionBeingClosed = sessions.find(s => s.id === sessionId);
-    const workspaceIdToMaybeClose =
-      sessionBeingClosed?.workspaceId &&
-      sessions.every(s => s.id === sessionId || s.workspaceId !== sessionBeingClosed.workspaceId)
-        ? sessionBeingClosed.workspaceId
-        : undefined;
-
-    setSessions(prevSessions => {
-      const targetSession = prevSessions.find(s => s.id === sessionId);
-      const wsId = targetSession?.workspaceId;
-
-      setWorkspaces(prevWorkspaces => {
-        const {
-          workspaces: nextWorkspaces,
-          removedWorkspaceId,
-          dissolvedWorkspaceId,
-          lastRemainingSessionId,
-        } = closeSessionWorkspaceLayoutState(prevWorkspaces, wsId, sessionId);
-
-        const remainingSessions = prevSessions.filter(s => s.id !== sessionId);
-        const fallbackWorkspace = nextWorkspaces[nextWorkspaces.length - 1];
-        const fallbackSolo = remainingSessions.filter(s => !s.workspaceId).slice(-1)[0];
-
-        const currentActiveTabId = activeTabStore.getActiveTabId();
-        const getFallback = () => {
-          if (lastRemainingSessionId) return lastRemainingSessionId;
-          if (fallbackWorkspace) return fallbackWorkspace.id;
-          if (fallbackSolo) return fallbackSolo.id;
-          return 'vault';
-        };
-
-        if (dissolvedWorkspaceId && lastRemainingSessionId) {
-          setTabOrder(prevTabOrder => replaceDissolvedWorkspaceTabOrder(
-            prevTabOrder,
-            dissolvedWorkspaceId,
-            [lastRemainingSessionId],
-          ));
-        }
-
-        if (dissolvedWorkspaceId && currentActiveTabId === dissolvedWorkspaceId) {
-          setActiveTabId(getFallback());
-        } else if (currentActiveTabId === sessionId) {
-          setActiveTabId(getFallback());
-        } else if (removedWorkspaceId && currentActiveTabId === removedWorkspaceId) {
-          setActiveTabId(getFallback());
-        } else if (wsId && currentActiveTabId === wsId && !nextWorkspaces.find(w => w.id === wsId)) {
-          setActiveTabId(getFallback());
-        }
-
-        return nextWorkspaces;
-      });
-
-      // Check if we need to dissolve a workspace (convert remaining session to orphan)
-      if (targetSession?.workspaceId) {
-        const ws = workspaces.find(w => w.id === targetSession.workspaceId);
-        if (ws) {
-          const pruned = pruneWorkspaceNode(ws.root, sessionId);
-          if (pruned) {
-            const remainingSessionIds = collectSessionIds(pruned);
-            if (remainingSessionIds.length === 1) {
-              // Dissolve: remove workspaceId from the remaining session
-              return prevSessions
-                .filter(s => s.id !== sessionId)
-                .map(s => remainingSessionIds.includes(s.id) ? { ...s, workspaceId: undefined } : s);
-            }
-          }
-        }
-      }
-
-      return prevSessions.filter(s => s.id !== sessionId);
+  const closeSessions = useCallback((sessionIds: string[]) => {
+    cleanupClosedTerminalSessions(sessionIds);
+    const result = closeSessionsState({
+      sessions: sessionsRef.current,
+      workspaces: workspacesRef.current,
+      sessionIds,
+      currentActiveTabId: activeTabStore.getActiveTabId(),
+      tabOrder: tabOrderRef.current,
     });
 
-    if (workspaceIdToMaybeClose) {
-      queueMicrotask(() => closeWorkspace(workspaceIdToMaybeClose!));
+    setWorkspaces(result.workspaces);
+    setSessions(result.sessions);
+    setTabOrder(result.tabOrder);
+    if (result.activeTabId) {
+      setActiveTabId(result.activeTabId);
     }
-  }, [sessions, workspaces, setActiveTabId, closeWorkspace]);
+  }, [setActiveTabId]);
+
+  const closeSession = useCallback((sessionId: string, e?: MouseEvent) => {
+    e?.stopPropagation();
+    closeSessions([sessionId]);
+  }, [closeSessions]);
 
   const startSessionRename = useCallback((sessionId: string) => {
     setSessions(prevSessions => {
@@ -558,29 +508,7 @@ export const useSessionState = ({
     const newSessions: TerminalSession[] = hosts.map(host => {
       // Handle serial hosts specially
       if (host.protocol === 'serial') {
-        const serialConfig: SerialConfig = host.serialConfig || {
-          path: host.hostname,
-          baudRate: host.port || 115200,
-          dataBits: 8,
-          stopBits: 1,
-          parity: 'none',
-          flowControl: 'none',
-          localEcho: false,
-          lineMode: false,
-        };
-
-        const portName = serialConfig.path.split('/').pop() || serialConfig.path;
-        return {
-          id: crypto.randomUUID(),
-          hostId: host.id,
-          hostLabel: host.label || `Serial: ${portName}`,
-          hostname: serialConfig.path,
-          username: '',
-          status: 'connecting',
-          protocol: 'serial',
-          serialConfig: serialConfig,
-          charset: host.charset,
-        };
+        return createHostTerminalSession(crypto.randomUUID(), host);
       }
 
       return {
@@ -630,45 +558,17 @@ export const useSessionState = ({
     const newSessions: TerminalSession[] = targets.map((target) => {
       if (target.kind === 'local') {
         const sessionId = crypto.randomUUID();
-        return {
-          id: sessionId,
-          hostId: `local-${sessionId}`,
-          hostLabel: target.shellName || 'Local Terminal',
-          hostname: 'localhost',
-          username: 'local',
-          status: 'connecting',
-          protocol: 'local',
+        return createLocalTerminalSession(sessionId, {
           shellType: target.shellType,
-          localShell: target.shell,
-          localShellArgs: target.shellArgs,
-          localShellName: target.shellName,
-          localShellIcon: target.shellIcon,
-        };
+          shell: target.shell,
+          shellArgs: target.shellArgs,
+          shellName: target.shellName,
+          shellIcon: target.shellIcon,
+        });
       }
       const host = target.host;
       if (host.protocol === 'serial') {
-        const serialConfig: SerialConfig = host.serialConfig || {
-          path: host.hostname,
-          baudRate: host.port || 115200,
-          dataBits: 8,
-          stopBits: 1,
-          parity: 'none',
-          flowControl: 'none',
-          localEcho: false,
-          lineMode: false,
-        };
-        const portName = serialConfig.path.split('/').pop() || serialConfig.path;
-        return {
-          id: crypto.randomUUID(),
-          hostId: host.id,
-          hostLabel: host.label || `Serial: ${portName}`,
-          hostname: serialConfig.path,
-          username: '',
-          status: 'connecting',
-          protocol: 'serial',
-          serialConfig,
-          charset: host.charset,
-        };
+        return createHostTerminalSession(crypto.randomUUID(), host);
       }
       return {
         id: crypto.randomUUID(),
@@ -708,23 +608,38 @@ export const useSessionState = ({
   ) => {
     if (!hint || baseSessionId === joiningSessionId) return;
     const newWorkspace = createWorkspaceEntity(baseSessionId, joiningSessionId, hint);
-    
-	    setSessions(prevSessions => {
-      const base = prevSessions.find(s => s.id === baseSessionId);
-      const joining = prevSessions.find(s => s.id === joiningSessionId);
+
+    setSessions((prevSessions) => {
+      const base = prevSessions.find((s) => s.id === baseSessionId);
+      const joining = prevSessions.find((s) => s.id === joiningSessionId);
       if (!base || !joining || base.workspaceId || joining.workspaceId) return prevSessions;
 
-      setWorkspaces(prev => addWorkspaceIfMissing(prev, newWorkspace));
+      setWorkspaces((prev) => addWorkspaceIfMissing(prev, newWorkspace));
+      // Collapse the two session tab slots into the workspace tab so later
+      // detach/close can replace `ws-*` with session ids again.
+      setTabOrder((prevTabOrder) => {
+        const withoutSessions = prevTabOrder.filter(
+          (id) => id !== baseSessionId && id !== joiningSessionId,
+        );
+        if (withoutSessions.includes(newWorkspace.id)) return withoutSessions;
+        const indexes = [baseSessionId, joiningSessionId]
+          .map((id) => prevTabOrder.indexOf(id))
+          .filter((index) => index >= 0);
+        const insertAt = indexes.length > 0 ? Math.min(...indexes) : withoutSessions.length;
+        const next = [...withoutSessions];
+        next.splice(Math.min(insertAt, next.length), 0, newWorkspace.id);
+        return next;
+      });
       setActiveTabId(newWorkspace.id);
-      
-      return prevSessions.map(s => {
+
+      return prevSessions.map((s) => {
         if (s.id === baseSessionId || s.id === joiningSessionId) {
           return { ...s, workspaceId: newWorkspace.id };
         }
         return s;
       });
-	    });
-	  }, [setActiveTabId]);
+    });
+  }, [setActiveTabId]);
 
   const addSessionToWorkspace = useCallback((
     workspaceId: string,
@@ -821,20 +736,14 @@ export const useSessionState = ({
     if (!workspacesRef.current.some(w => w.id === workspaceId)) return null;
 
     const newSessionId = crypto.randomUUID();
-    const localHostId = `local-${newSessionId}`;
     const newSession: TerminalSession = {
-      id: newSessionId,
-      hostId: localHostId,
-      hostLabel: options?.shellName || 'Local Terminal',
-      hostname: 'localhost',
-      username: 'local',
-      status: 'connecting',
-      protocol: 'local',
-      shellType: options?.shellType,
-      localShell: options?.shell,
-      localShellArgs: options?.shellArgs,
-      localShellName: options?.shellName,
-      localShellIcon: options?.shellIcon,
+      ...createLocalTerminalSession(newSessionId, {
+        shellType: options?.shellType,
+        shell: options?.shell,
+        shellArgs: options?.shellArgs,
+        shellName: options?.shellName,
+        shellIcon: options?.shellIcon,
+      }),
       workspaceId,
     };
 
@@ -1036,7 +945,7 @@ export const useSessionState = ({
 	    setActiveTabId(workspace.id);
 	  }, [setActiveTabId]);
 
-  const orphanSessions = useMemo(() => sessions.filter(s => !s.workspaceId), [sessions]);
+  const orphanSessions = useMemo(() => sessions.filter(s => !s.workspaceId && !s.hiddenFromTabs), [sessions]);
 
   const openLogView = useCallback((log: ConnectionLog) => {
     const tabId = getLogViewTabId(log);
@@ -1152,40 +1061,41 @@ export const useSessionState = ({
       additionalTabIds?: readonly string[];
     },
   ) => {
-    setSessions(prevSessions => {
-      const result = detachSessionFromWorkspaceState({
-        sessions: prevSessions,
-        workspaces: workspacesRef.current,
-        sessionId,
-      });
-
-      if (!result.changed) return prevSessions;
-      setWorkspaces(result.workspaces);
-      setTabOrder(prevTabOrder => {
-        const replacedOrder = replaceDissolvedWorkspaceTabOrder(
-          prevTabOrder,
-          result.dissolvedWorkspaceId,
-          result.replacementTabIds,
-        );
-        if (!tabInsertionTarget) return replacedOrder;
-
-        const allTabIds = [
-          ...result.sessions.filter(s => !s.workspaceId).map(s => s.id),
-          ...result.workspaces.map(w => w.id),
-          ...logViews.map(lv => lv.id),
-          ...(tabInsertionTarget.additionalTabIds ?? []),
-        ];
-        return reorderWorkTabIds(
-          replacedOrder,
-          allTabIds,
-          sessionId,
-          tabInsertionTarget.tabId,
-          tabInsertionTarget.position,
-        );
-      });
-      if (result.activeTabId) setActiveTabId(result.activeTabId);
-      return result.sessions;
+    // Detach from latest refs so continuous-render / memoized panes cannot
+    // act on a stale workspace snapshot and drop the terminal instead of
+    // restoring it as a standalone tab.
+    const result = detachSessionFromWorkspaceState({
+      sessions: sessionsRef.current,
+      workspaces: workspacesRef.current,
+      sessionId,
     });
+    if (!result.changed) return;
+
+    setWorkspaces(result.workspaces);
+    setSessions(result.sessions);
+    setTabOrder((prevTabOrder) => {
+      const replacedOrder = replaceDissolvedWorkspaceTabOrder(
+        prevTabOrder,
+        result.dissolvedWorkspaceId,
+        result.replacementTabIds,
+      );
+      if (!tabInsertionTarget) return replacedOrder;
+
+      const allTabIds = [
+        ...result.sessions.filter((s) => !s.workspaceId).map((s) => s.id),
+        ...result.workspaces.map((w) => w.id),
+        ...logViews.map((lv) => lv.id),
+        ...(tabInsertionTarget.additionalTabIds ?? []),
+      ];
+      return reorderWorkTabIds(
+        replacedOrder,
+        allTabIds,
+        sessionId,
+        tabInsertionTarget.tabId,
+        tabInsertionTarget.position,
+      );
+    });
+    if (result.activeTabId) setActiveTabId(result.activeTabId);
   }, [logViews, setActiveTabId]);
 
   const reorderTabs = useCallback((
@@ -1229,6 +1139,7 @@ export const useSessionState = ({
     createSerialSession,
     connectToHost,
     closeSession,
+    closeSessions,
     closeWorkspace,
     updateSessionStatus,
     updateSessionFontSize,

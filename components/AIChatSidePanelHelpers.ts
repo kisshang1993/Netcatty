@@ -20,7 +20,22 @@ type SdkRuntimeModelRefreshOptions = {
 };
 
 const SDK_RUNTIME_MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
-const MODEL_CACHE_ENV_HINTS = ['CLAUDE_CODE_EXECUTABLE', 'CODEBUDDY_CODE_PATH', 'OPENCODE_BIN'] as const;
+// Keep in sync with main-process SDK_MODEL_CACHE_ENV_KEYS: profile-affecting
+// env must bust the renderer cache so we re-query after OpenCode config switches.
+const MODEL_CACHE_ENV_HINTS = [
+  'HOME',
+  'USERPROFILE',
+  'XDG_CONFIG_HOME',
+  'OPENCODE_BIN',
+  'OPENCODE_CONFIG',
+  'OPENCODE_CONFIG_DIR',
+  'OPENCODE_CONFIG_CONTENT',
+  'CLAUDE_CODE_EXECUTABLE',
+  'CODEBUDDY_CODE_PATH',
+  'CURSOR_API_KEY',
+  'NETCATTY_CURSOR_AUTH_MODE',
+  'NETCATTY_CURSOR_CLI_BIN',
+] as const;
 
 function cloneCatalog(catalog: SdkRuntimeModelCatalog): SdkRuntimeModelCatalog {
   return {
@@ -44,10 +59,11 @@ export function buildSdkRuntimeModelCacheKey(agent: {
   sdkBackend?: string;
   acpCommand?: string;
   env?: Record<string, string>;
+  codexRuntime?: 'sdk' | 'app-server';
 }): string {
   const sdkBackend = agent.sdkBackend || agent.acpCommand || '';
   const envHints = MODEL_CACHE_ENV_HINTS.map((key) => `${key}=${agent.env?.[key] ?? ''}`);
-  return [agent.id, sdkBackend, agent.command ?? '', ...envHints].join('\u0000');
+  return [agent.id, sdkBackend, agent.command ?? '', agent.codexRuntime ?? 'sdk', ...envHints].join('\u0000');
 }
 
 export function createSdkRuntimeModelCache(options: SdkRuntimeModelCacheOptions = {}) {
@@ -110,8 +126,10 @@ export function modelPresetsContainId(presets: AgentModelPreset[], modelId: stri
 
 export function shouldLoadSdkRuntimeModels(agent?: ExternalAgentConfig): boolean {
   const sdkBackend = getExternalAgentSdkBackend(agent);
-  return sdkBackend === 'claude'
+  return (sdkBackend === 'codex' && agent?.codexRuntime === 'app-server')
+    || sdkBackend === 'claude'
     || sdkBackend === 'copilot'
+    || sdkBackend === 'cursor'
     || sdkBackend === 'codebuddy'
     || sdkBackend === 'opencode';
 }

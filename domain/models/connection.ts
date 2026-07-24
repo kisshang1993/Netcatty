@@ -106,6 +106,8 @@ export interface SerialConfig {
   flowControl?: SerialFlowControl; // Flow control (default: 'none')
   localEcho?: boolean; // Force local echo (default: false, rely on remote echo)
   lineMode?: boolean; // Line mode - buffer input and send on Enter (default: false)
+  // Store the default explicitly so an open/restored session keeps its launch-time behavior.
+  backspaceBehavior?: 'default' | 'ctrl-h';
 }
 
 // Per-protocol configuration
@@ -128,6 +130,8 @@ export interface SftpBookmark {
   global?: boolean;
 }
 
+export type HostAuthMethod = 'auto' | 'password' | 'key' | 'certificate';
+
 export interface Host {
   id: string;
   label: string;
@@ -144,9 +148,28 @@ export interface Host {
   deviceType?: 'general' | 'network';
   identityFileId?: string; // Reference to SSHKey
   protocol?: 'ssh' | 'telnet' | 'local' | 'serial'; // Default/primary protocol
+  // Runtime marker for in-memory-only hosts (e.g. password deep links).
+  // Ephemeral hosts are never persisted to the vault or session restore.
+  ephemeral?: boolean;
+  // Runtime hint for deep-link launches that target file transfer (e.g.
+  // JumpServer sftp payloads): auto-open the SFTP side panel on connect.
+  autoOpenSftpPanel?: boolean;
   password?: string;
   savePassword?: boolean; // Whether to save the password (default: true)
-  authMethod?: 'password' | 'key' | 'certificate';
+  authMethod?: HostAuthMethod;
+  // Version 1 distinguishes the explicit per-host login choices from the
+  // legacy "password" default, which did not mean password-only.
+  authPolicyVersion?: 1;
+  // Prefer keyboard-interactive before the password method for MFA/PAM hosts.
+  requiresMfa?: boolean;
+  // Use the local SSH agent for login. This is separate from agentForwarding,
+  // which exposes the local agent to the remote host after login.
+  useSshAgent?: boolean;
+  // OpenSSH config metadata used for agent-backed authentication.
+  identityAgent?: string;
+  identitiesOnly?: boolean;
+  addKeysToAgent?: string;
+  useKeychain?: boolean;
   agentForwarding?: boolean;
   x11Forwarding?: boolean;
   createdAt?: number; // Timestamp when host was created
@@ -197,6 +220,9 @@ export interface Host {
   serialConfig?: SerialConfig;
   // SFTP specific configuration
   sftpSudo?: boolean; // Use sudo for SFTP operations (requires password)
+  // Remote file browser protocol: Auto tries SFTP then falls back to SCP-mode
+  // (shell browse + scp -t/-f transfers) when the SFTP subsystem is unavailable.
+  sftpFileProtocol?: 'auto' | 'sftp' | 'scp';
   sftpEncoding?: SftpFilenameEncoding; // Filename encoding for SFTP operations
   sftpBookmarks?: SftpBookmark[]; // Bookmarked SFTP paths for quick navigation
   sftpFollowTerminalCwd?: boolean; // Overrides global SFTP follow-terminal-directory setting
@@ -225,6 +251,9 @@ export interface Host {
   keepaliveInterval?: number; // Seconds; 0 = disabled
   keepaliveCountMax?: number; // Unanswered keepalives before declaring dead
   keepaliveOverride?: boolean;
+  // Per-host SSH connection timeouts. Missing values retain Netcatty defaults.
+  sshTcpConnectTimeoutSeconds?: number;
+  sshAuthReadyTimeoutSeconds?: number;
   // Show local timestamps for this host beside terminal output rows.
   // Kept per-host because timestamp visibility is usually a host/workflow preference.
   showLineTimestamps?: boolean;
@@ -246,6 +275,7 @@ export interface Host {
   localShellArgs?: string[];
   localShellName?: string;
   localShellIcon?: string;
+  localStartDir?: string;
   /** User-authored Markdown notes (project, hardware, region, etc.) */
   notes?: string;
   order?: number;
@@ -351,7 +381,7 @@ export interface GroupConfig {
   username?: string;
   password?: string;
   savePassword?: boolean;
-  authMethod?: 'password' | 'key' | 'certificate';
+  authMethod?: HostAuthMethod;
   identityId?: string;
   identityFileId?: string;
   identityFilePaths?: string[];
@@ -376,6 +406,7 @@ export interface GroupConfig {
   etPort?: number;
   telnetEnabled?: boolean;
   telnetPort?: number;
+  telnetIdentityId?: string;
   telnetUsername?: string;
   telnetPassword?: string;
   theme?: string;

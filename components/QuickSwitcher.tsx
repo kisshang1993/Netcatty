@@ -9,16 +9,97 @@ import {
 } from "lucide-react";
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
-import { Host, TerminalSession, Workspace } from "../types";
+import { Host, TerminalSession, TerminalSettings, Workspace } from "../types";
 import { KeyBinding } from "../domain/models";
 import { matchesSearchQuery } from "../lib/searchMatcher";
-import { useDiscoveredShells, getShellIconPath, isMonochromeShellIcon } from "../lib/useDiscoveredShells";
+import { buildQuickSwitcherShells, useDiscoveredShells, getShellIconPath, isMonochromeShellIcon } from "../lib/useDiscoveredShells";
+import { usePluginContributions } from "../application/state/usePluginContributions";
+import { requestOpenPluginView } from "./plugins/PluginContributionHost";
+import { PluginContributionIcon } from "./plugins/PluginContributionIcon";
 
-type QuickSwitcherItem = {
-  type: "host" | "tab" | "workspace" | "action" | "shell";
+type QuickSwitcherItemBase = {
   id: string;
   data?: Host | TerminalSession | Workspace;
+  pluginTitle?: string;
+  title?: string;
+  enabled?: boolean;
+  altCommand?: string;
+  shortcut?: string;
+  pluginId?: string;
+  icon?: NetcattyPluginIconReference;
 };
+
+type QuickSwitcherItem = QuickSwitcherItemBase & (
+  | { type: "plugin-command"; commandId: string }
+  | { type: "host" | "tab" | "workspace" | "action" | "shell" | "plugin-view"; commandId?: never }
+);
+
+export function getQuickSwitcherRowStateClass(
+  isSelected: boolean,
+  isKeyboardNavigating: boolean,
+): string {
+  if (isSelected) return "bg-primary/15";
+  return isKeyboardNavigating ? "" : "hover:bg-muted/50";
+}
+
+export function shouldUseQuickSwitcherPointerNavigation(
+  movementX: number,
+  movementY: number,
+): boolean {
+  return movementX !== 0 || movementY !== 0;
+}
+
+export function buildPluginPaletteItems(
+  plugins: NetcattyPluginContributionSnapshot['plugins'],
+  trimmedQuery: string,
+): QuickSwitcherItem[] {
+  return plugins.flatMap((plugin) => {
+    const commandById = new Map(plugin.commands.map((command) => [command.id, command] as const));
+    const paletteMenus = plugin.menus
+      .filter((menu) => menu.location === 'commandPalette' && menu.visible)
+      .sort((left, right) => (left.group ?? '').localeCompare(right.group ?? '')
+        || (left.order ?? 0) - (right.order ?? 0)
+        || left.id.localeCompare(right.id));
+    const commands: QuickSwitcherItem[] = paletteMenus
+      .map((menu) => ({ menu, command: commandById.get(menu.command) }))
+      .filter((entry): entry is typeof entry & { command: NonNullable<typeof entry.command> } => Boolean(entry.command))
+      .filter(({ menu, command }) => !trimmedQuery || matchesSearchQuery(
+        trimmedQuery,
+        menu.title ?? command.title,
+        command.category ?? '',
+        plugin.displayName,
+      ))
+      .map(({ command, menu }) => {
+        const icon = menu.icon ?? command.icon;
+        return {
+          type: 'plugin-command' as const,
+          id: menu.id,
+          commandId: command.id,
+          title: menu.title,
+          pluginTitle: plugin.displayName,
+          pluginId: plugin.id,
+          enabled: command.enabled && menu.enabled,
+          ...(icon ? { icon } : {}),
+          ...(menu.alt ? { altCommand: menu.alt } : {}),
+          ...(menu.shortcut ? { shortcut: menu.shortcut } : {}),
+        };
+      });
+    const views: QuickSwitcherItem[] = plugin.views
+      .filter((view) => view.visible)
+      .filter((view) => !trimmedQuery || matchesSearchQuery(trimmedQuery, view.title, plugin.displayName, view.id))
+      .sort((left, right) => (left.order ?? 0) - (right.order ?? 0) || left.id.localeCompare(right.id))
+      .map((view) => ({
+        type: 'plugin-view' as const,
+        id: view.id,
+        title: view.title,
+        pluginTitle: plugin.displayName,
+        pluginId: plugin.id,
+        enabled: true,
+        ...(view.icon ? { icon: view.icon } : {}),
+      }));
+    return [...commands, ...views];
+  });
+}
 import { DistroAvatar } from "./DistroAvatar";
 import { Input } from "./ui/input";
 import { ScrollArea } from "./ui/scroll-area";
@@ -30,19 +111,20 @@ const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(naviga
 const HostItem = memo(({
   host,
   isSelected,
+  isKeyboardNavigating,
+  selectedItemRef,
   onSelect,
-  onMouseEnter,
 }: {
   host: Host;
   isSelected: boolean;
+  isKeyboardNavigating: boolean;
+  selectedItemRef?: React.RefCallback<HTMLDivElement>;
   onSelect: (host: Host) => void;
-  onMouseEnter: () => void;
 }) => (
   <div
-    className={`flex items-center justify-between px-4 py-2.5 cursor-pointer transition-colors ${isSelected ? "bg-primary/15" : "hover:bg-muted/50"
-      }`}
+    ref={selectedItemRef}
+    className={`flex items-center justify-between px-4 py-2.5 cursor-pointer transition-colors ${getQuickSwitcherRowStateClass(isSelected, isKeyboardNavigating)}`}
     onClick={() => onSelect(host)}
-    onMouseEnter={onMouseEnter}
   >
     <div className="flex items-center gap-3 min-w-0">
       <DistroAvatar
@@ -73,6 +155,7 @@ interface QuickSwitcherProps {
   onCreateWorkspace?: () => void;
   keyBindings?: KeyBinding[];
   showSftpTab: boolean;
+  terminalSettings?: Pick<TerminalSettings, "localShell" | "localShellArgs">;
 }
 
 const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
@@ -89,19 +172,30 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
   onCreateWorkspace,
   keyBindings,
   showSftpTab,
+  terminalSettings,
 }) => {
   const { t } = useI18n();
   const discoveredShells = useDiscoveredShells();
+  const pluginContributions = usePluginContributions({
+    context: { 'netcatty.surface': 'commandPalette' },
+  });
+  const quickSwitcherShells = useMemo(() => (
+    buildQuickSwitcherShells(
+      discoveredShells,
+      terminalSettings?.localShell ?? "",
+      terminalSettings?.localShellArgs,
+    )
+  ), [discoveredShells, terminalSettings?.localShell, terminalSettings?.localShellArgs]);
 
   const filteredShells = useMemo(() => {
     const list = !query.trim()
-      ? discoveredShells
-      : discoveredShells.filter(
-          (s) => matchesSearchQuery(query, s.name, s.id)
+      ? quickSwitcherShells
+      : quickSwitcherShells.filter(
+          (s) => matchesSearchQuery(query, s.name, s.id, s.command)
         );
     // Default shell first
     return [...list].sort((a, b) => (a.isDefault === b.isDefault ? 0 : a.isDefault ? -1 : 1));
-  }, [discoveredShells, query]);
+  }, [quickSwitcherShells, query]);
 
   // Get hotkey display strings
   const getHotkeyLabel = useCallback((actionId: string) => {
@@ -111,8 +205,20 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
   }, [keyBindings]);
   const quickSwitchKey = getHotkeyLabel('quick-switch');
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [isKeyboardNavigating, setIsKeyboardNavigating] = useState(true);
+  const isKeyboardNavigatingRef = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const selectedItemRef = useRef<HTMLElement>(null);
+  const setSelectedItemRef = useCallback((element: HTMLElement | null) => {
+    selectedItemRef.current = element;
+  }, []);
+  const handlePointerHover = useCallback((movementX: number, movementY: number) => {
+    if (!shouldUseQuickSwitcherPointerNavigation(movementX, movementY)) return;
+    if (!isKeyboardNavigatingRef.current) return;
+    isKeyboardNavigatingRef.current = false;
+    setIsKeyboardNavigating(false);
+  }, []);
 
   // Reset state when opening
   useEffect(() => {
@@ -123,6 +229,8 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
     }, 50);
 
     setSelectedIndex(0);
+    isKeyboardNavigatingRef.current = true;
+    setIsKeyboardNavigating(true);
 
     return () => {
       window.clearTimeout(focusTimer);
@@ -148,7 +256,7 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
 
   // Memoize orphan sessions
   const orphanSessions = useMemo(
-    () => sessions.filter((s) => !s.workspaceId),
+    () => sessions.filter((s) => !s.workspaceId && !s.hiddenFromTabs),
     [sessions]
   );
   const trimmedQuery = query.trim();
@@ -181,6 +289,10 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
     );
   }, [trimmedQuery, workspaces]);
   const shouldShowLocalTerminalFallback = filteredShells.length === 0 && !!onCreateLocalTerminal && !trimmedQuery;
+  const pluginPaletteItems = useMemo(() => buildPluginPaletteItems(
+    pluginContributions.snapshot.plugins,
+    trimmedQuery,
+  ), [pluginContributions.snapshot.plugins, trimmedQuery]);
 
   // Always show categorized view (Hosts/Tabs/Quick connect)
   const showCategorized = true;
@@ -212,6 +324,7 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
       } else if (shouldShowLocalTerminalFallback) {
         items.push({ type: "action", id: "local-terminal" });
       }
+      items.push(...pluginPaletteItems);
     } else {
       // Recent connections only
       results.forEach((host) =>
@@ -221,6 +334,7 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
       filteredShells.forEach((shell) =>
         items.push({ type: "shell", id: shell.id }),
       );
+      items.push(...pluginPaletteItems);
     }
 
     // Build index map for O(1) lookup
@@ -230,30 +344,42 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
     });
 
     return { flatItems: items, itemIndexMap: indexMap };
-  }, [showCategorized, results, builtInTabs, filteredOrphanSessions, filteredWorkspaces, filteredShells, shouldShowLocalTerminalFallback]);
+  }, [showCategorized, results, builtInTabs, filteredOrphanSessions, filteredWorkspaces, filteredShells, shouldShowLocalTerminalFallback, pluginPaletteItems]);
 
   // O(1) index lookup
   const getItemIndex = useCallback((type: string, id: string) => {
     return itemIndexMap.get(`${type}:${id}`) ?? -1;
   }, [itemIndexMap]);
 
+  const selectedItem = flatItems[selectedIndex];
+  const selectedItemKey = selectedItem ? `${selectedItem.type}:${selectedItem.id}` : '';
+
+  useEffect(() => {
+    if (!isOpen || !selectedItemKey) return;
+    selectedItemRef.current?.scrollIntoView({ block: "nearest" });
+  }, [isOpen, selectedIndex, selectedItemKey]);
+
   if (!isOpen) return null;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
+      isKeyboardNavigatingRef.current = true;
+      setIsKeyboardNavigating(true);
       setSelectedIndex((prev) => Math.min(prev + 1, flatItems.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
+      isKeyboardNavigatingRef.current = true;
+      setIsKeyboardNavigating(true);
       setSelectedIndex((prev) => Math.max(prev - 1, 0));
     } else if (e.key === "Enter" && flatItems.length > 0) {
       e.preventDefault();
       const item = flatItems[selectedIndex];
-      handleItemSelect(item);
+      handleItemSelect(item, e.altKey);
     }
   };
 
-  const handleItemSelect = (item: QuickSwitcherItem) => {
+  const handleItemSelect = (item: QuickSwitcherItem, useAlternate = false) => {
     switch (item.type) {
       case "host":
         onSelect(item.data as Host);
@@ -270,13 +396,27 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
         }
         break;
       case "shell": {
-        const shell = discoveredShells.find(s => s.id === item.id);
+        const shell = quickSwitcherShells.find(s => s.id === item.id);
         if (shell && onCreateLocalTerminal) {
           onCreateLocalTerminal({ command: shell.command, args: shell.args, name: shell.name, icon: shell.icon });
           onClose();
         }
         break;
       }
+      case "plugin-command":
+        if (item.enabled !== false) {
+          void pluginContributions.executeCommand(
+            useAlternate && item.altCommand ? item.altCommand : item.commandId,
+            undefined,
+            { 'netcatty.surface': 'commandPalette' },
+          ).catch(() => {});
+          onClose();
+        }
+        break;
+      case "plugin-view":
+        requestOpenPluginView({ viewId: item.id, context: { 'netcatty.surface': 'commandPalette' } });
+        onClose();
+        break;
     }
   };
 
@@ -289,6 +429,7 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
         ref={containerRef}
         className="w-full max-w-2xl mx-4 bg-background border border-border rounded-xl shadow-2xl overflow-hidden max-h-[520px] flex flex-col"
         style={{ pointerEvents: "auto" }}
+        onMouseMove={(event) => handlePointerHover(event.movementX, event.movementY)}
       >
         {/* Search Header */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
@@ -299,6 +440,8 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
             onChange={(e) => {
               onQueryChange(e.target.value);
               setSelectedIndex(0);
+              isKeyboardNavigatingRef.current = true;
+              setIsKeyboardNavigating(true);
             }}
             onKeyDown={handleKeyDown}
             placeholder={t("qs.search.placeholder")}
@@ -311,32 +454,32 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
           )}
         </div>
 
+        {/* Jump To hint + New Workspace action */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-4 py-2">
+          <span className="text-xs text-muted-foreground">{t("qs.jumpTo")}</span>
+          {quickSwitchKey && (
+            <kbd className="text-[10px] text-muted-foreground bg-muted px-1 py-0.5 rounded">
+              {quickSwitchKey.replace(/ \+ /g, '+')}
+            </kbd>
+          )}
+          {onCreateWorkspace && (
+            <button
+              type="button"
+              onClick={() => {
+                onCreateWorkspace();
+                onClose();
+              }}
+              className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground border border-border rounded px-1.5 py-0.5 transition-colors hover:bg-muted/50"
+            >
+              <Plus size={11} />
+              <span>New Workspace</span>
+            </button>
+          )}
+        </div>
+
         <ScrollArea className="flex-1 h-full">
           {/* Categorized view: Hosts/Tabs/Quick connect */}
           <div>
-            {/* Jump To hint + New Workspace action */}
-            <div className="px-4 py-2 flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">{t("qs.jumpTo")}</span>
-              {quickSwitchKey && (
-                <kbd className="text-[10px] text-muted-foreground bg-muted px-1 py-0.5 rounded">
-                  {quickSwitchKey.replace(/ \+ /g, '+')}
-                </kbd>
-              )}
-              {onCreateWorkspace && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onCreateWorkspace();
-                    onClose();
-                  }}
-                  className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground border border-border rounded px-1.5 py-0.5 transition-colors hover:bg-muted/50"
-                >
-                  <Plus size={11} />
-                  <span>New Workspace</span>
-                </button>
-              )}
-            </div>
-
             {/* Hosts section */}
             {results.length > 0 && (
               <div>
@@ -350,8 +493,9 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                     key={host.id}
                     host={host}
                     isSelected={getItemIndex("host", host.id) === selectedIndex}
+                    isKeyboardNavigating={isKeyboardNavigating}
+                    selectedItemRef={getItemIndex("host", host.id) === selectedIndex ? setSelectedItemRef : undefined}
                     onSelect={onSelect}
-                    onMouseEnter={() => setSelectedIndex(getItemIndex("host", host.id))}
                   />
                 ))}
               </div>
@@ -380,13 +524,12 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                 return (
                   <div
                     key={tabId}
-                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${isSelected ? "bg-primary/15" : "hover:bg-muted/50"
-                      }`}
+                    ref={isSelected ? setSelectedItemRef : undefined}
+                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${getQuickSwitcherRowStateClass(isSelected, isKeyboardNavigating)}`}
                     onClick={() => {
                       onSelectTab(tabId);
                       onClose();
                     }}
-                    onMouseEnter={() => setSelectedIndex(idx)}
                   >
                     <div className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground">
                       {icon}
@@ -404,13 +547,12 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                 return (
                   <div
                     key={workspace.id}
-                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${isSelected ? "bg-primary/15" : "hover:bg-muted/50"
-                      }`}
+                    ref={isSelected ? setSelectedItemRef : undefined}
+                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${getQuickSwitcherRowStateClass(isSelected, isKeyboardNavigating)}`}
                     onClick={() => {
                       onSelectTab(workspace.id);
                       onClose();
                     }}
-                    onMouseEnter={() => setSelectedIndex(idx)}
                   >
                     <div className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground">
                       <LayoutGrid size={16} />
@@ -430,13 +572,12 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                 return (
                   <div
                     key={session.id}
-                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${isSelected ? "bg-primary/15" : "hover:bg-muted/50"
-                      }`}
+                    ref={isSelected ? setSelectedItemRef : undefined}
+                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${getQuickSwitcherRowStateClass(isSelected, isKeyboardNavigating)}`}
                     onClick={() => {
                       onSelectTab(session.id);
                       onClose();
                     }}
-                    onMouseEnter={() => setSelectedIndex(idx)}
                   >
                     <div className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground">
                       <TerminalSquare size={16} />
@@ -464,16 +605,14 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                   return (
                     <div
                       key={shell.id}
-                      className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${
-                        isSelected ? "bg-primary/15" : "hover:bg-muted/50"
-                      }`}
+                      ref={isSelected ? setSelectedItemRef : undefined}
+                      className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${getQuickSwitcherRowStateClass(isSelected, isKeyboardNavigating)}`}
                       onClick={() => {
                         if (onCreateLocalTerminal) {
                           onCreateLocalTerminal({ command: shell.command, args: shell.args, name: shell.name, icon: shell.icon });
                           onClose();
                         }
                       }}
-                      onMouseEnter={() => setSelectedIndex(idx)}
                     >
                       <img
                         src={getShellIconPath(shell.icon)}
@@ -498,24 +637,52 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                   </span>
                 </div>
                 <div
-                  className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${
-                    getItemIndex("action", "local-terminal") === selectedIndex
-                      ? "bg-primary/15"
-                      : "hover:bg-muted/50"
-                  }`}
+                  ref={getItemIndex("action", "local-terminal") === selectedIndex ? setSelectedItemRef : undefined}
+                  className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${getQuickSwitcherRowStateClass(
+                    getItemIndex("action", "local-terminal") === selectedIndex,
+                    isKeyboardNavigating,
+                  )}`}
                   onClick={() => {
                     onCreateLocalTerminal();
                     onClose();
                   }}
-                  onMouseEnter={() =>
-                    setSelectedIndex(getItemIndex("action", "local-terminal"))
-                  }
                 >
                   <div className="h-6 w-6 rounded flex items-center justify-center text-muted-foreground">
                     <Terminal size={16} />
                   </div>
                   <span className="text-sm font-medium">{t("qs.localTerminal")}</span>
                 </div>
+              </div>
+            )}
+
+            {pluginPaletteItems.length > 0 && (
+              <div>
+                <div className="px-4 py-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">{t('settings.tab.plugins')}</span>
+                </div>
+                {pluginPaletteItems.map((item) => {
+                  const idx = getItemIndex(item.type, item.id);
+                  const isSelected = idx === selectedIndex;
+                  return (
+                    <button
+                      type="button"
+                      key={`${item.type}:${item.id}`}
+                      ref={isSelected ? setSelectedItemRef : undefined}
+                      disabled={item.enabled === false}
+                      className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${getQuickSwitcherRowStateClass(isSelected, isKeyboardNavigating)} disabled:opacity-50`}
+                      onClick={(event) => handleItemSelect(item, event.altKey)}
+                    >
+                      <div className="flex h-6 w-6 items-center justify-center text-muted-foreground">
+                        <PluginContributionIcon pluginId={item.pluginId} icon={item.icon} size={16} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">{item.title}</div>
+                        <div className="truncate text-[10px] text-muted-foreground">{item.pluginTitle}</div>
+                      </div>
+                      {item.shortcut && <kbd className="text-[10px] text-muted-foreground">{item.shortcut}</kbd>}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>

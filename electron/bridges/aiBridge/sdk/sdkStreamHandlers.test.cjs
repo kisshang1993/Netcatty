@@ -36,10 +36,28 @@ test("SDK session keys include backend and resolved CLI path", () => {
   );
 });
 
+test("Cursor session keys isolate CLI login from API key auth modes", () => {
+  assert.notEqual(
+    buildSdkSessionKey("chat-1", "cursor", "/usr/bin/agent", "sdk", "cli-login"),
+    buildSdkSessionKey("chat-1", "cursor", "cursor", "sdk", "api-key"),
+  );
+});
+
 test("SDK model cache keys include resolved CLI path", () => {
   assert.notEqual(
     buildSdkModelCacheKey("claude", "/usr/local/bin/claude"),
     buildSdkModelCacheKey("claude", "/opt/homebrew/bin/claude"),
+  );
+});
+
+test("SDK model cache keys include catalog-affecting agent environment", () => {
+  assert.notEqual(
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/a", OPENCODE_CONFIG_DIR: "/a/config" }),
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/b", OPENCODE_CONFIG_DIR: "/b/config" }),
+  );
+  assert.equal(
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/a" }),
+    buildSdkModelCacheKey("opencode", "/usr/bin/opencode", { HOME: "/Users/a" }),
   );
 });
 
@@ -57,10 +75,13 @@ test("normalizeSdkListModelsResult preserves current model ids from object resul
   });
 });
 
-test("shouldCacheSdkRuntimeModels skips OpenCode model catalogs", () => {
-  assert.equal(shouldCacheSdkRuntimeModels("opencode"), false);
+test("shouldCacheSdkRuntimeModels caches all SDK backends including OpenCode", () => {
+  // OpenCode used to skip the cache, which re-spawned opencode servers on every
+  // model-catalog probe (#2184). TTL still bounds staleness.
+  assert.equal(shouldCacheSdkRuntimeModels("opencode"), true);
   assert.equal(shouldCacheSdkRuntimeModels("claude"), true);
   assert.equal(shouldCacheSdkRuntimeModels("codebuddy"), true);
+  assert.equal(shouldCacheSdkRuntimeModels("copilot"), true);
 });
 
 test("SDK resume only uses the current backend/path session key", () => {
@@ -123,6 +144,34 @@ test("SDK resume uses persisted session identity only when backend and path matc
   );
 });
 
+test("Codex sessions never resume across SDK and App Server runtimes", () => {
+  const sdkIdentity = `netcatty-sdk-session:${encodeURIComponent(JSON.stringify({
+    v: 1,
+    id: "sdk-thread",
+    backend: "codex",
+    binPath: "/usr/bin/codex",
+    runtime: "sdk",
+  }))}`;
+  assert.equal(resolveSdkResumeSessionId({
+    sdkSessionIds: new Map(),
+    sdkSessionKey: buildSdkSessionKey("chat-1", "codex", "/usr/bin/codex", "app-server"),
+    existingSessionId: sdkIdentity,
+    backendKey: "codex",
+    binPath: "/usr/bin/codex",
+    runtime: "app-server",
+    hasConfiguredCommand: false,
+  }), undefined);
+  assert.equal(resolveSdkResumeSessionId({
+    sdkSessionIds: new Map(),
+    sdkSessionKey: buildSdkSessionKey("chat-1", "codex", "/usr/bin/codex", "app-server"),
+    existingSessionId: "legacy-thread",
+    backendKey: "codex",
+    binPath: "/usr/bin/codex",
+    runtime: "app-server",
+    hasConfiguredCommand: false,
+  }), undefined);
+});
+
 test("SDK resume keeps legacy session ids only when no manual command is configured", () => {
   assert.equal(
     resolveSdkResumeSessionId({
@@ -143,6 +192,57 @@ test("SDK resume keeps legacy session ids only when no manual command is configu
       backendKey: "codex",
       binPath: "/manual/codex",
       hasConfiguredCommand: true,
+    }),
+    undefined,
+  );
+});
+
+test("Cursor CLI login sessions do not resume on the API key SDK path", () => {
+  const cliIdentity = `netcatty-sdk-session:${encodeURIComponent(JSON.stringify({
+    v: 1,
+    id: "61668441-bfcb-4795-a575-c46d70ad01fe",
+    backend: "cursor",
+    binPath: "/usr/bin/agent",
+    runtime: "sdk",
+    authMode: "cli-login",
+  }))}`;
+
+  assert.equal(
+    resolveSdkResumeSessionId({
+      sdkSessionIds: new Map(),
+      sdkSessionKey: buildSdkSessionKey("chat-1", "cursor", "cursor", "sdk", "api-key"),
+      existingSessionId: cliIdentity,
+      backendKey: "cursor",
+      binPath: "cursor",
+      runtime: "sdk",
+      authMode: "api-key",
+      hasConfiguredCommand: false,
+    }),
+    undefined,
+  );
+  assert.equal(
+    resolveSdkResumeSessionId({
+      sdkSessionIds: new Map(),
+      sdkSessionKey: buildSdkSessionKey("chat-1", "cursor", "/usr/bin/agent", "sdk", "cli-login"),
+      existingSessionId: cliIdentity,
+      backendKey: "cursor",
+      binPath: "/usr/bin/agent",
+      runtime: "sdk",
+      authMode: "cli-login",
+      hasConfiguredCommand: false,
+    }),
+    "61668441-bfcb-4795-a575-c46d70ad01fe",
+  );
+  assert.equal(
+    resolveSdkResumeSessionId({
+      sdkSessionIds: new Map(),
+      sdkSessionKey: buildSdkSessionKey("chat-1", "cursor", "cursor", "sdk", "cli-login"),
+      existingSessionId: "61668441-bfcb-4795-a575-c46d70ad01fe",
+      backendKey: "cursor",
+      binPath: "cursor",
+      runtime: "sdk",
+      authMode: "cli-login",
+      hasConfiguredCommand: false,
     }),
     undefined,
   );

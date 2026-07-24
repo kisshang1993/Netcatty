@@ -12,6 +12,14 @@ module.exports = {
         {
             name: 'SSH URL',
             schemes: ['ssh']
+        },
+        {
+            name: 'Telnet URL',
+            schemes: ['telnet']
+        },
+        {
+            name: 'JumpServer URL',
+            schemes: ['jms']
         }
     ],
     electronLanguages: ['en', 'en-US', 'zh_CN', 'zh-CN', 'zh_TW', 'zh-TW', 'ru'],
@@ -46,6 +54,10 @@ module.exports = {
     files: [
         'dist/**/*',
         'electron/**/*',
+        // Runtime smoke fixtures are built test packages, not host resources.
+        // Keep them out of production ASARs so no example plugin can be
+        // mistaken for an installed or host-trusted package.
+        '!electron/plugins/fixtures/**/*',
         // Main-process terminal flow control reads shared thresholds from here
         // (terminalFlowAck.cjs). Must ship beside electron/ in app.asar.
         'infrastructure/config/terminalFlowConstants.cjs',
@@ -141,6 +153,10 @@ module.exports = {
         'lib/**/*.json',
         'node_modules/zod/**/*',
         'node_modules/zod-to-json-schema/**/*',
+        'node_modules/@netcatty/plugin-cli/**/*',
+        'node_modules/@netcatty/plugin-contract/**/*',
+        'node_modules/@netcatty/plugin-sdk/**/*',
+        'electron/plugins/runtime/**/*',
         'node_modules/ajv/**/*',
         'node_modules/ajv-formats/**/*',
         'node_modules/fast-deep-equal/**/*',
@@ -171,7 +187,15 @@ module.exports = {
         extendInfo: {
             NSCameraUsageDescription: 'Netcatty may use the camera for video calls',
             NSMicrophoneUsageDescription: 'Netcatty may use the microphone for audio',
-            NSLocalNetworkUsageDescription: 'Netcatty needs local network access for SSH connections'
+            NSLocalNetworkUsageDescription: 'Netcatty needs local network access for SSH connections',
+            CFBundleDocumentTypes: [
+                {
+                    CFBundleTypeName: 'Folder',
+                    CFBundleTypeRole: 'Viewer',
+                    LSHandlerRank: 'Alternate',
+                    LSItemContentTypes: ['public.folder']
+                }
+            ]
         },
         extraResources: [...moshExtraResources('darwin'), ...etExtraResources('darwin')]
     },
@@ -233,6 +257,22 @@ module.exports = {
         // Use gzip instead of default xz(lzma) for better compatibility with
         // Deepin OS and other distros that have issues with lzma decompression
         compression: 'gz'
+    },
+    rpm: {
+        // Default fpm/electron-builder RPM compression is "xzmt" (multi-threaded
+        // xz). AlmaLinux/RHEL 8 images provide `xz` but not the `xzmt` shim, so
+        // rpmbuild fails with exit 127 during packaging. gzip is portable and
+        // matches our deb preference for older distros.
+        compression: 'gzip',
+        fpm: [
+            // Avoid rpm's generated /usr/lib/.build-id symlinks. Those hashes
+            // are global on the host, so owning them can conflict with other RPMs.
+            '--rpm-rpmbuild-define', '_build_id_links none',
+            // Electron ships prebuilt binaries. RHEL/Alma brp post-install
+            // scripts (strip/compress/etc.) can exit 127 when a helper is
+            // missing or a gcc-toolset `strip` is on PATH; skip them.
+            '--rpm-rpmbuild-define', '__os_install_post %{nil}',
+        ]
     },
     pacman: {
         // FPM-generated .pacman packages bypass Arch's alpm hooks that

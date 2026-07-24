@@ -8,6 +8,7 @@ import { getCredentialProtectionAvailability } from "../../../infrastructure/ser
 import { netcattyBridge } from "../../../infrastructure/services/netcattyBridge";
 import type { UpdateState } from '../../../application/state/useUpdateCheck';
 import { SessionLogFormat, keyEventToString } from "../../../domain/models";
+import type { HttpNetworkProxyMode, HttpNetworkProxySettings } from "../../../domain/httpNetworkProxy";
 import { Button } from "../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import { Toggle, Select, SettingRow, SectionHeader, SettingCard, SettingsTabContent } from "../settings-ui";
@@ -88,6 +89,8 @@ interface SettingsSystemTabProps {
   setSshDebugLogsEnabled: (enabled: boolean) => void;
   sshDeepLinkEnabled: boolean;
   setSshDeepLinkEnabled: (enabled: boolean) => void;
+  jmsDeepLinkEnabled: boolean;
+  setJmsDeepLinkEnabled: (enabled: boolean) => void;
   restorePreviousSession: boolean;
   setRestorePreviousSession: (enabled: boolean) => void;
   restoreTerminalCwd: boolean;
@@ -96,6 +99,8 @@ interface SettingsSystemTabProps {
   setToggleWindowHotkey: (hotkey: string) => void;
   closeToTray: boolean;
   setCloseToTray: (enabled: boolean) => void;
+  httpNetworkProxy: HttpNetworkProxySettings;
+  setHttpNetworkProxy: (settings: HttpNetworkProxySettings | ((prev: HttpNetworkProxySettings) => HttpNetworkProxySettings)) => void;
   hotkeyRegistrationError: string | null;
   globalHotkeyEnabled: boolean;
   setGlobalHotkeyEnabled: (enabled: boolean) => void;
@@ -122,6 +127,8 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
   setSshDebugLogsEnabled,
   sshDeepLinkEnabled,
   setSshDeepLinkEnabled,
+  jmsDeepLinkEnabled,
+  setJmsDeepLinkEnabled,
   restorePreviousSession,
   setRestorePreviousSession,
   restoreTerminalCwd,
@@ -130,6 +137,8 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
   setToggleWindowHotkey,
   closeToTray,
   setCloseToTray,
+  httpNetworkProxy,
+  setHttpNetworkProxy,
   hotkeyRegistrationError,
   globalHotkeyEnabled,
   setGlobalHotkeyEnabled,
@@ -539,6 +548,68 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
               {t('settings.update.hint')}
             </p>
 
+          <SectionHeader title={t("settings.system.networkProxy.title")} />
+            <SettingCard className="space-y-4 py-4">
+              <SettingRow
+                label={t("settings.system.networkProxy.mode")}
+                description={t("settings.system.networkProxy.description")}
+              >
+                <Select
+                  value={httpNetworkProxy.mode}
+                  onChange={(value) => {
+                    const mode = value as HttpNetworkProxyMode;
+                    setHttpNetworkProxy((prev) => ({ ...prev, mode }));
+                  }}
+                  options={[
+                    { value: "system", label: t("settings.system.networkProxy.mode.system") },
+                    { value: "direct", label: t("settings.system.networkProxy.mode.direct") },
+                    { value: "custom", label: t("settings.system.networkProxy.mode.custom") },
+                  ]}
+                />
+              </SettingRow>
+              {httpNetworkProxy.mode === "custom" && (
+                <>
+                  <SettingRow
+                    label={t("settings.system.networkProxy.url")}
+                    description={t("settings.system.networkProxy.url.desc")}
+                  >
+                    <input
+                      type="text"
+                      value={httpNetworkProxy.url}
+                      onChange={(e) => {
+                        const url = e.target.value;
+                        setHttpNetworkProxy((prev) => ({ ...prev, url }));
+                      }}
+                      placeholder={t("settings.system.networkProxy.url.placeholder")}
+                      className="w-64 h-9 rounded-md border border-input bg-background px-3 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                  </SettingRow>
+                  <SettingRow
+                    label={t("settings.system.networkProxy.bypass")}
+                    description={t("settings.system.networkProxy.bypass.desc")}
+                  >
+                    <input
+                      type="text"
+                      value={httpNetworkProxy.bypass}
+                      onChange={(e) => {
+                        const bypass = e.target.value;
+                        setHttpNetworkProxy((prev) => ({ ...prev, bypass }));
+                      }}
+                      placeholder={t("settings.system.networkProxy.bypass.placeholder")}
+                      className="w-64 h-9 rounded-md border border-input bg-background px-3 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                  </SettingRow>
+                </>
+              )}
+            </SettingCard>
+            <p className="text-xs text-muted-foreground">
+              {t("settings.system.networkProxy.hint")}
+            </p>
+
           <SectionHeader title={t("settings.system.credentials.title")} />
             <SettingCard className="space-y-3 py-4">
               <div className="flex items-start justify-between gap-4">
@@ -895,7 +966,6 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
                   options={formatOptions}
                   onChange={(val) => setSessionLogsFormat(val as SessionLogFormat)}
                   className="w-44"
-                  disabled={!sessionLogsEnabled}
                 />
               </SettingRow>
 
@@ -906,7 +976,6 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
                 <Toggle
                   checked={sessionLogsTimestampsEnabled}
                   onChange={setSessionLogsTimestampsEnabled}
-                  disabled={!sessionLogsEnabled}
                 />
               </SettingRow>
             </SettingCard>
@@ -925,6 +994,20 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
                   checked={sshDeepLinkEnabled}
                   onChange={setSshDeepLinkEnabled}
                   ariaLabel={t('settings.sshDeepLink.enable')}
+                />
+              </SettingRow>
+            </SettingCard>
+
+          <SectionHeader title={t('settings.jmsDeepLink.title')} />
+            <SettingCard>
+              <SettingRow
+                label={t('settings.jmsDeepLink.enable')}
+                description={t('settings.jmsDeepLink.enableDesc')}
+              >
+                <Toggle
+                  checked={jmsDeepLinkEnabled}
+                  onChange={setJmsDeepLinkEnabled}
+                  ariaLabel={t('settings.jmsDeepLink.enable')}
                 />
               </SettingRow>
             </SettingCard>

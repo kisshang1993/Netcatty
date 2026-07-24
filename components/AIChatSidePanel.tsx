@@ -13,7 +13,12 @@ import type {
   ExternalAgentConfig,
 } from '../infrastructure/ai/types';
 import type { ExecutorContext } from '../infrastructure/ai/cattyAgent/executor';
-import { getAgentModelPresets } from '../infrastructure/ai/types';
+import {
+  filterAgentModelPresetsForCliVersion,
+  getAgentModelPresets,
+  resolveAgentCliVersion,
+  resolveAgentModelSelection,
+} from '../infrastructure/ai/types';
 import { getExternalAgentSdkBackend, getManualAgentCommand, matchesManagedAgentConfig } from '../infrastructure/ai/managedAgents';
 import { useAgentDiscovery } from '../application/state/useAgentDiscovery';
 import {
@@ -49,6 +54,7 @@ import { getScopedHistorySessions } from './ai/scopedHistorySessions';
 import { buildExternalAgentHistoryMessagesForBridge } from './ai/externalAgentHistory';
 import { canSendWithAgent, findEnabledExternalAgent } from './ai/agentSendEligibility';
 import { registerGrantPersister } from '../infrastructure/ai/shared/approvalGate';
+import { setupCodexAppServerInteractionBridge } from '../infrastructure/ai/shared/codexAppServerInteractions';
 import { stopAgentTurn } from '../infrastructure/ai/harness/agentStop';
 import { getAgentRuntime } from '../infrastructure/ai/harness/globalAgentRuntime';
 import { useAIPermissionGrantsState } from '../application/state/useAIPermissionGrantsState';
@@ -84,6 +90,11 @@ type SdkRuntimeModelTarget = {
   sdkBackend: string;
   agentEnv?: Record<string, string>;
   agentCommand?: string;
+  codexRuntime?: 'sdk' | 'app-server';
+};
+type SteerWarning = {
+  reason: 'not-steerable' | 'busy' | 'inactive' | 'unsupported' | 'cancelled' | 'failed';
+  turnKind?: 'review' | 'compact';
 };
 
 const USER_SKILLS_STATUS_CACHE_TTL_MS = 60_000;
@@ -287,6 +298,9 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
 
   const [showHistory, setShowHistory] = useState(false);
   const [runtimeAgentModelPresets, setRuntimeAgentModelPresets] = useState<Record<string, AgentModelPreset[]>>({});
+  const [runtimeModelWarnings, setRuntimeModelWarnings] = useState<Record<string, string>>({});
+  const [steerWarnings, setSteerWarnings] = useState<Record<string, SteerWarning>>({});
+  const [steeringSessionId, setSteeringSessionId] = useState<string | null>(null);
   const [userSkillOptions, setUserSkillOptions] = useState<UserSkillOption[]>([]);
   const [userSkillsStatusVersion, setUserSkillsStatusVersion] = useState(0);
   const { openSettingsWindow } = useWindowControls();
@@ -301,6 +315,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     abortControllersRef,
     sendToCattyAgent,
     sendToExternalAgent,
+    steerExternalAgent,
     reportStreamError,
     activeCompaction,
   } = useAIChatStreaming({
@@ -353,6 +368,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   );
   const activeSessionId = normalizedPanelView.mode === 'session' ? normalizedPanelView.sessionId : null;
   const isStreaming = activeSessionId ? streamingSessionIds.has(activeSessionId) : false;
+  const isSteering = activeSessionId != null && steeringSessionId === activeSessionId;
   const currentAgentId = activeSession?.agentId ?? currentDraft?.agentId ?? defaultAgentId;
   const inputValue = currentDraft?.text ?? '';
   const files = currentDraft?.attachments ?? [];
@@ -678,24 +694,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       sdkBackend,
       agentEnv: agent.env,
       agentCommand: getManualAgentCommand(agent),
-    };
-  }, []);
-
-  const buildDiscoveredAgentRuntimeModelTarget = useCallback((agent: DiscoveredAgent): SdkRuntimeModelTarget | null => {
-    const sdkBackend = agent.sdkBackend ?? agent.command;
-    if (sdkBackend !== 'opencode') return null;
-    const command = agent.binPath || agent.path || agent.command;
-    const agentId = `discovered_${agent.command}`;
-    return {
-      agentId,
-      cacheKey: buildSdkRuntimeModelCacheKey({
-        id: agentId,
-        command,
-        sdkBackend,
-        env: command ? { OPENCODE_BIN: command } : undefined,
-      }),
-      sdkBackend,
-      agentCommand: command,
+      codexRuntime: sdkBackend === 'codex' ? (agent.codexRuntime ?? 'sdk') : undefined,
     };
   }, []);
 
@@ -745,10 +744,21 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
           `models_${target.agentId}`,
           target.agentEnv,
           target.agentCommand,
+          target.codexRuntime,
         );
         if (!result?.ok || !Array.isArray(result.models)) {
           throw new Error(result?.error || 'Failed to load SDK agent models');
         }
+        setRuntimeModelWarnings((current) => {
+          const next = { ...current };
+          if (result.warning && target.codexRuntime === 'app-server') {
+            next[target.agentId] = t('ai.codex.appServer.modelCatalogWarning');
+            console.warn('[AIChatSidePanel] Codex App Server model catalog unavailable:', result.warning);
+          } else {
+            delete next[target.agentId];
+          }
+          return next;
+        });
         return {
           currentModelId: result.currentModelId ?? null,
           models: result.models,
@@ -756,12 +766,18 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       },
       { force: options.force },
     ).catch((err) => {
+      if (target.codexRuntime === 'app-server') {
+        setRuntimeModelWarnings((current) => ({
+          ...current,
+          [target.agentId]: t('ai.codex.appServer.modelCatalogWarning'),
+        }));
+      }
       if (options.logErrors !== false) {
         console.warn('[AIChatSidePanel] Failed to load SDK agent models:', err);
       }
       return null;
     });
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -776,10 +792,12 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       applySdkRuntimeModelCatalog(target.agentId, cached);
     }
 
+    // Respect renderer TTL / in-flight coalescing for all SDK agents including
+    // OpenCode. Forced refresh used to re-spawn opencode on every effect re-run
+    // even when the user never selected OpenCode (#2184). Manual refresh still
+    // passes force via the model selector path.
     let cancelled = false;
-    void loadSdkRuntimeModelCatalog(target, {
-      force: target.sdkBackend === 'opencode',
-    }).then((catalog) => {
+    void loadSdkRuntimeModelCatalog(target).then((catalog) => {
       if (cancelled || !catalog) return;
       applySdkRuntimeModelCatalog(target.agentId, catalog, { adoptCurrentModel: true });
     });
@@ -796,52 +814,9 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     applySdkRuntimeModelCatalog,
   ]);
 
-  useEffect(() => {
-    if (!isVisible) return;
-    const targets = new Map<string, SdkRuntimeModelTarget>();
-    const configuredTargetCacheKeys = new Set<string>();
-
-    for (const agent of externalAgents) {
-      if (!agent.enabled || getExternalAgentSdkBackend(agent) !== 'opencode') continue;
-      const target = buildExternalAgentRuntimeModelTarget(agent);
-      if (target) {
-        targets.set(target.cacheKey, target);
-        configuredTargetCacheKeys.add(target.cacheKey);
-      }
-    }
-
-    for (const agent of discoveredAgents) {
-      const target = buildDiscoveredAgentRuntimeModelTarget(agent);
-      if (target) targets.set(target.cacheKey, target);
-    }
-
-    if (targets.size === 0) return;
-
-    let cancelled = false;
-    for (const target of targets.values()) {
-      void loadSdkRuntimeModelCatalog(target, { logErrors: false })
-        .then((catalog) => {
-          if (cancelled || !catalog) return;
-          if (configuredTargetCacheKeys.has(target.cacheKey)) {
-            applySdkRuntimeModelCatalog(target.agentId, catalog);
-          }
-        });
-    }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    isVisible,
-    externalAgents,
-    discoveredAgents,
-    buildExternalAgentRuntimeModelTarget,
-    buildDiscoveredAgentRuntimeModelTarget,
-    loadSdkRuntimeModelCatalog,
-    applySdkRuntimeModelCatalog,
-  ]);
-
-  const hasCodexCustomConfig = codexCustomConfigResolved && isCodexManagedAgent;
+  const isCodexAppServer = isCodexManagedAgent && currentAgentConfig?.codexRuntime === 'app-server';
+  const canSteerCurrentTurn = Boolean(activeSessionId && isStreaming && isCodexAppServer);
+  const hasCodexCustomConfig = codexCustomConfigResolved && isCodexManagedAgent && !isCodexAppServer;
 
   const agentModelPresets = useMemo(() => {
     const runtimePresets = runtimeAgentModelPresets[currentAgentId];
@@ -854,8 +829,22 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       }
       return [];
     }
-    return runtimePresets ?? getAgentModelPresets(currentAgentConfig?.command);
-  }, [currentAgentConfig?.command, currentAgentId, runtimeAgentModelPresets, hasCodexCustomConfig, codexConfigModel]);
+    if (runtimePresets) return runtimePresets;
+    const presets = getAgentModelPresets(
+      currentAgentConfig?.command,
+      getExternalAgentSdkBackend(currentAgentConfig),
+    );
+    // BYO Codex CLI: hide GPT-5.6 when CLI < 0.144.0 (stored probe or discovery).
+    const cliVersion = resolveAgentCliVersion(currentAgentConfig, discoveredAgents);
+    return filterAgentModelPresetsForCliVersion(presets, cliVersion);
+  }, [
+    currentAgentConfig,
+    currentAgentId,
+    runtimeAgentModelPresets,
+    hasCodexCustomConfig,
+    codexConfigModel,
+    discoveredAgents,
+  ]);
 
   const selectedAgentModel = useMemo(() => {
     const stored = agentModelMap[currentAgentId];
@@ -863,11 +852,14 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       return stored;
     }
     if (agentModelPresets.length > 0) {
-      const first = agentModelPresets[0];
-      if (first.thinkingLevels?.length) {
-        return `${first.id}/${first.thinkingLevels[first.thinkingLevels.length - 1]}`;
+      // Cursor CLI login defaults to `auto` (subscription quota routing).
+      if (currentAgentConfig?.cursorAuthMode === 'cli-login') {
+        const autoPreset = agentModelPresets.find((preset) => preset.id === 'auto');
+        if (autoPreset) return resolveAgentModelSelection(autoPreset);
       }
-      return first.id;
+      // Use catalog defaultThinkingLevel — do not pick last array entry
+      // (that made GPT-5.6 Sol default to ultra).
+      return resolveAgentModelSelection(agentModelPresets[0]);
     }
     return undefined;
   }, [currentAgentConfig, currentAgentId, agentModelMap, agentModelPresets]);
@@ -1072,7 +1064,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
         }
         try {
           const existingExternalSessionId = currentSession?.externalSessionId;
-          await sendToExternalAgent(sessionId, modelPrompt, agentConfig, abortController, modelAttachments, {
+          await sendToExternalAgent(sessionId, assistantMsgId, modelPrompt, agentConfig, abortController, modelAttachments, {
             existingSessionId: existingExternalSessionId,
             updateExternalSessionId: updateSessionExternalSessionId,
             historyMessages: buildExternalAgentHistoryMessagesForBridge(currentSession?.messages ?? [], existingExternalSessionId),
@@ -1082,6 +1074,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
             selectedAgentModel,
             toolIntegrationMode,
             selectedUserSkillSlugs: selectedSkillSlugs,
+            permissionMode: globalPermissionMode,
           });
         } catch (err) {
           reportStreamError(sessionId, abortController.signal, err);
@@ -1130,6 +1123,57 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     clearScopeDraft, showScopeSessionView, setActiveSessionId,
   ]);
 
+  const handleSteer = useCallback(async () => {
+    const sessionId = activeSessionRef.current?.id;
+    const draft = currentDraftRef.current;
+    if (!sessionId || !draft || steeringSessionId || !canSteerCurrentTurn) return;
+
+    const trimmed = draft.text.trim();
+    const attachments = draft.attachments.map((file) => ({
+      base64Data: file.base64Data,
+      mediaType: file.mediaType,
+      filename: file.filename,
+      filePath: file.filePath,
+      terminalSelection: file.terminalSelection,
+      previewText: file.previewText,
+      lineCount: file.lineCount,
+    }));
+    const hasTerminalSelectionAttachments = attachments.some(isTerminalSelectionAttachment);
+    if (!trimmed && !hasTerminalSelectionAttachments) return;
+
+    const userMessageId = generateId();
+    const modelPrompt = buildPromptWithTerminalSelectionAttachments(trimmed, attachments);
+    const modelAttachments = attachments.filter((attachment) => !isTerminalSelectionAttachment(attachment));
+    setSteerWarnings(current => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setSteeringSessionId(sessionId);
+    try {
+      const result = await steerExternalAgent({
+        chatSessionId: sessionId,
+        userMessageId,
+        userText: trimmed,
+        prompt: modelPrompt,
+        attachments,
+        attachedImages: modelAttachments,
+      });
+      if (result.status === 'accepted') {
+        if (currentDraftRef.current === draft) clearScopeDraft();
+        return;
+      }
+      if (result.status !== 'cancelled') {
+        setSteerWarnings(current => ({
+          ...current,
+          [sessionId]: { reason: result.status, turnKind: result.turnKind },
+        }));
+      }
+    } finally {
+      setSteeringSessionId(current => current === sessionId ? null : current);
+    }
+  }, [canSteerCurrentTurn, clearScopeDraft, steerExternalAgent, steeringSessionId]);
+
   const stopStreamingForSession = useCallback(async (sessionId: string) => {
     const controller = abortControllersRef.current.get(sessionId);
     setStreamingForScope(sessionId, false);
@@ -1156,10 +1200,45 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     return registerGrantPersister((rule) => { addGrant(rule); });
   }, [addGrant]);
 
+  useEffect(() => setupCodexAppServerInteractionBridge(), []);
+
   const handleStop = useCallback(() => {
     if (!activeSessionId) return;
+    setSteeringSessionId(current => current === activeSessionId ? null : current);
+    setSteerWarnings(current => {
+      const next = { ...current };
+      delete next[activeSessionId];
+      return next;
+    });
     stopStreamingForSession(activeSessionId);
   }, [activeSessionId, stopStreamingForSession]);
+
+  useEffect(() => {
+    if (!activeSessionId || isStreaming) return;
+    setSteeringSessionId(current => current === activeSessionId ? null : current);
+    setSteerWarnings(current => {
+      if (!current[activeSessionId]) return current;
+      const next = { ...current };
+      delete next[activeSessionId];
+      return next;
+    });
+  }, [activeSessionId, isStreaming]);
+
+  const steerWarning = useMemo(() => {
+    if (!activeSessionId) return undefined;
+    const warning = steerWarnings[activeSessionId];
+    if (!warning) return undefined;
+    if (warning.reason === 'not-steerable' && warning.turnKind === 'review') {
+      return t('ai.codex.steer.notSteerableReview');
+    }
+    if (warning.reason === 'not-steerable' && warning.turnKind === 'compact') {
+      return t('ai.codex.steer.notSteerableCompact');
+    }
+    if (warning.reason === 'busy') return t('ai.codex.steer.busy');
+    if (warning.reason === 'inactive') return t('ai.codex.steer.inactive');
+    if (warning.reason === 'unsupported') return t('ai.codex.steer.unsupported');
+    return t('ai.codex.steer.failed');
+  }, [activeSessionId, steerWarnings, t]);
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
@@ -1193,7 +1272,6 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       }
 
       deleteSession(sessionId, scopeKey);
-      getAgentRuntime().clearChatSession(sessionId);
 
       if (deletingActiveSession || deletingLastScopedSession) {
         setShowHistory(false);
@@ -1258,10 +1336,16 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
         inputValue={inputValue}
         setInputValue={setInputValue}
         handleSend={handleSend}
+        handleSteer={handleSteer}
         handleStop={handleStop}
+        canSteer={canSteerCurrentTurn}
+        isSteering={isSteering}
+        steerWarning={steerWarning}
+        lockTurnConfiguration={Boolean(isStreaming && isCodexAppServer)}
         canSendCurrentAgent={canSendCurrentAgent}
         providerDisplayName={providerDisplayName}
         modelDisplayName={modelDisplayName}
+        modelCatalogWarning={runtimeModelWarnings[currentAgentId]}
         agentModelPresets={agentModelPresets}
         selectedAgentModel={selectedAgentModel}
         handleAgentModelSelect={handleAgentModelSelect}

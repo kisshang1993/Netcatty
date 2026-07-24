@@ -34,6 +34,12 @@ export interface CodexIntegrationStatus {
   customConfig?: CodexCustomProviderConfig | null;
 }
 
+export interface CodexAppServerStatus {
+  available: boolean;
+  checking?: boolean;
+  error?: string;
+}
+
 export type CodexLoginState = "running" | "success" | "error" | "cancelled";
 
 export interface CodexLoginSession {
@@ -54,6 +60,36 @@ export interface AgentPathInfo {
   installed?: boolean;
   authenticated?: boolean;
   authSource?: string | null;
+  cliEmail?: string | null;
+  cliBinPath?: string | null;
+  /** True when local Cursor Agent CLI is logged in (subscription session). */
+  cliLoginOk?: boolean;
+  /** True when settings or env API key is present. */
+  apiKeyOk?: boolean;
+  /** True when @cursor/sdk platform package is importable. */
+  sdkInstalled?: boolean;
+}
+
+/** Mode-aware Cursor availability for Settings enablement. */
+export function isCursorAvailableForMode(
+  pathInfo: AgentPathInfo | null | undefined,
+  mode: "api-key" | "cli-login",
+  options?: { hasStoredApiKey?: boolean },
+): boolean {
+  if (!pathInfo) return false;
+  if (mode === "cli-login") {
+    return Boolean(pathInfo.cliLoginOk || pathInfo.authSource === "cli-login");
+  }
+  const hasKey = Boolean(
+    options?.hasStoredApiKey
+    || pathInfo.apiKeyOk
+    || pathInfo.authSource === "settings"
+    || pathInfo.authSource === "CURSOR_API_KEY",
+  );
+  const sdkOk = pathInfo.sdkInstalled !== undefined
+    ? Boolean(pathInfo.sdkInstalled)
+    : Boolean(pathInfo.installed);
+  return hasKey && sdkOk;
 }
 
 export interface UserSkillStatusItem {
@@ -112,10 +148,24 @@ export interface NetcattyAiBridge {
   aiCodexCancelLogin?: (sessionId: string) => Promise<{ ok: boolean; found?: boolean; session?: CodexLoginSession; error?: string }>;
   aiCodexLogout?: (options?: { codexPath?: string }) => Promise<{ ok: boolean; state?: CodexIntegrationState; isConnected?: boolean; rawOutput?: string; logoutOutput?: string; error?: string }>;
   aiResolveCli?: (params: { command: string; customPath?: string; refreshShellEnv?: boolean; apiKeyPresent?: boolean }) => Promise<AgentPathInfo>;
-  aiSdkAgentListModels?: (sdkBackend: string, cwd?: string, providerId?: string, chatSessionId?: string, agentEnv?: Record<string, string>, agentCommand?: string) => Promise<{ ok: boolean; models?: Array<{ id: string; name: string; description?: string; thinkingLevels?: string[] }>; currentModelId?: string | null; error?: string }>;
+  aiSdkAgentListModels?: (sdkBackend: string, cwd?: string, providerId?: string, chatSessionId?: string, agentEnv?: Record<string, string>, agentCommand?: string, codexRuntime?: 'sdk' | 'app-server') => Promise<{ ok: boolean; models?: Array<{ id: string; name: string; description?: string; thinkingLevels?: string[]; defaultThinkingLevel?: string }>; currentModelId?: string | null; error?: string }>;
+  codexAppServerGetStatus?: (agentCommand?: string, agentEnv?: Record<string, string>) => Promise<{ ok: boolean; available: boolean; error?: string }>;
   aiUserSkillsGetStatus?: () => Promise<UserSkillsStatusResult>;
   aiUserSkillsOpenFolder?: () => Promise<UserSkillsStatusResult>;
   openExternal?: (url: string) => Promise<void>;
+  externalMcpGetStatus?: () => Promise<Record<string, unknown>>;
+  externalMcpSetEnabled?: (enabled: boolean) => Promise<Record<string, unknown>>;
+  externalMcpSetConfig?: (config: {
+    mode?: 'temporary' | 'persistent';
+    idleTimeoutMinutes?: number;
+    sessionIdleTimeoutMinutes?: number;
+  }) => Promise<Record<string, unknown>>;
+  externalMcpCodexGetStatus?: () => Promise<Record<string, unknown>>;
+  externalMcpCodexAdd?: () => Promise<Record<string, unknown>>;
+  externalMcpClaudeGetStatus?: () => Promise<Record<string, unknown>>;
+  externalMcpClaudeAdd?: () => Promise<Record<string, unknown>>;
+  externalMcpGrokGetStatus?: () => Promise<Record<string, unknown>>;
+  externalMcpGrokAdd?: () => Promise<Record<string, unknown>>;
 }
 
 // Agent default configs for registration in externalAgents

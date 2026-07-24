@@ -20,7 +20,8 @@ import { useIsSftpActive } from "../application/state/activeTabStore";
 import { useSftpState } from "../application/state/useSftpState";
 import { useSftpBackend } from "../application/state/useSftpBackend";
 import { getParentPath, isConcreteTransferTargetPath } from "../application/state/sftp/utils";
-import { HotkeyScheme, KeyBinding } from "../domain/models";
+import { HotkeyScheme, KeyBinding, TerminalSession } from "../domain/models";
+import { listSftpConnectedHosts, sftpPickerSessionsEqual } from "../domain/sftpConnectedHosts";
 import { logger } from "../lib/logger";
 import { useRenderTracker } from "../lib/useRenderTracker";
 import { cn } from "../lib/utils";
@@ -52,6 +53,9 @@ import { keepOnlyActivePaneSelections, keepOnlyPaneSelections } from "./sftp/hoo
 // Main SftpView component
 interface SftpViewProps {
   hosts: Host[];
+  /** Vault-persisted hosts only; used for writes so ephemeral deep-link hosts stay out of vault. */
+  writableHosts?: Host[];
+  sessions?: TerminalSession[];
   keys: SSHKey[];
   identities: Identity[];
   knownHosts?: KnownHost[];
@@ -73,6 +77,8 @@ interface SftpViewProps {
 
 const SftpViewInner: React.FC<SftpViewProps> = ({
   hosts,
+  writableHosts,
+  sessions = [],
   keys,
   identities,
   knownHosts = [],
@@ -111,12 +117,16 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
 
   const sftpOptions = useMemo(() => ({
     ...fileWatchHandlers,
+    transferOwnerId: "main-sftp-view",
+    // Leaving the main SFTP page parks browse channels; transfers continue
+    // on dedicated pool sessions (and any leased browse sockets).
+    interactive: isActive,
     useCompressedUpload: sftpUseCompressedUpload,
     defaultShowHiddenFiles: sftpShowHiddenFiles,
     terminalSettings,
     knownHosts,
     onAddKnownHost,
-  }), [fileWatchHandlers, sftpUseCompressedUpload, sftpShowHiddenFiles, terminalSettings, knownHosts, onAddKnownHost]);
+  }), [fileWatchHandlers, isActive, sftpUseCompressedUpload, sftpShowHiddenFiles, terminalSettings, knownHosts, onAddKnownHost]);
 
   // Pre-resolve group defaults so SFTP connections inherit group config
   const effectiveHosts = useMemo(() => {
@@ -128,6 +138,15 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
       return materializeHostProxyProfile(withGroupDefaults, proxyProfiles);
     });
   }, [hosts, groupConfigs, proxyProfiles]);
+
+  const hostWriteSource = writableHosts ?? hosts;
+
+  const connectedHosts = useMemo(() => {
+    const hostsById = new Map<string, Host>(
+      effectiveHosts.map((host) => [host.id, host]),
+    );
+    return listSftpConnectedHosts(sessions, hostsById);
+  }, [effectiveHosts, sessions]);
 
   const sftp = useSftpState(effectiveHosts, keys, identities, sftpOptions);
 
@@ -429,7 +448,8 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
   return (
     <SftpContextProvider
       hosts={effectiveHosts}
-      writableHosts={hosts}
+      connectedHosts={connectedHosts}
+      writableHosts={hostWriteSource}
       updateHosts={updateHosts}
       draggedFiles={draggedFiles}
       dragCallbacks={dragCallbacks}
@@ -439,7 +459,7 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
       <div
         ref={rootRef}
         className={cn(
-          "absolute inset-0 min-h-0 flex flex-col",
+          "absolute inset-0 min-h-0 flex flex-col bg-background",
           isActive ? "z-20" : "",
         )}
         style={containerStyle}
@@ -571,6 +591,7 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
 
         <SftpOverlays
           hosts={effectiveHosts}
+          connectedHosts={connectedHosts}
           sftp={sftp}
           visibleTransfers={visibleTransfers}
           canRevealTransferTarget={canRevealTransferTarget}
@@ -616,6 +637,8 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
 
 export const sftpViewAreEqual = (prev: SftpViewProps, next: SftpViewProps): boolean =>
   prev.hosts === next.hosts &&
+  prev.writableHosts === next.writableHosts &&
+  sftpPickerSessionsEqual(prev.sessions, next.sessions) &&
   prev.keys === next.keys &&
   prev.identities === next.identities &&
   prev.knownHosts === next.knownHosts &&

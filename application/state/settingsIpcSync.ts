@@ -21,6 +21,7 @@ import {
   STORAGE_KEY_SESSION_LOGS_TIMESTAMPS_ENABLED,
   STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED,
   STORAGE_KEY_SSH_DEEP_LINK_ENABLED,
+  STORAGE_KEY_JMS_DEEP_LINK_ENABLED,
   STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR,
   STORAGE_KEY_SFTP_FOLLOW_TERMINAL_CWD,
   STORAGE_KEY_SFTP_DEFAULT_VIEW_MODE,
@@ -43,19 +44,25 @@ import {
   STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB,
   STORAGE_KEY_WINDOW_OPACITY,
   STORAGE_KEY_APP_ICON_VARIANT,
+  STORAGE_KEY_HTTP_NETWORK_PROXY,
 } from '../../infrastructure/config/storageKeys';
 import { resolveAppIconVariant, type AppIconVariant } from '../../domain/appIconVariant';
+import {
+  areHttpNetworkProxySettingsEqual,
+  normalizeHttpNetworkProxySettings,
+  type HttpNetworkProxySettings,
+} from '../../domain/httpNetworkProxy';
 import { netcattyBridge } from '../../infrastructure/services/netcattyBridge';
 import {
-  clampWindowOpacity,
   isValidUiFontId,
   migrateIncomingTerminalFontId,
 } from './settingsStateDefaults';
 import { isTerminalSidePanelAutoOpenTab, type TerminalSidePanelAutoOpenTab } from '../../domain/terminalSidePanelAutoOpen';
+import type { AppearanceSyncEvent } from './appearanceSync';
 
 interface UseSettingsIpcSyncParams {
   enabled?: boolean;
-  syncAppearanceFromStorage: () => void;
+  syncAppearanceFromStorage: (incoming?: AppearanceSyncEvent) => void;
   syncCustomCssFromStorage: () => void;
   setUiLanguage: Dispatch<SetStateAction<UILanguage>>;
   setUiFontFamilyId: Dispatch<SetStateAction<string>>;
@@ -73,13 +80,15 @@ interface UseSettingsIpcSyncParams {
   setSessionLogsTimestampsEnabled: Dispatch<SetStateAction<boolean>>;
   setSshDebugLogsEnabled: Dispatch<SetStateAction<boolean>>;
   setSshDeepLinkEnabledState: (enabled: boolean) => void;
+  setJmsDeepLinkEnabledState: (enabled: boolean) => void;
   setHotkeyScheme: Dispatch<SetStateAction<HotkeyScheme>>;
   applyIncomingCustomKeyBindings: (incoming: { bindings: CustomKeyBindings; version: number; origin: string }) => void;
   setIsHotkeyRecordingState: Dispatch<SetStateAction<boolean>>;
   setGlobalHotkeyEnabled: Dispatch<SetStateAction<boolean>>;
-  setWindowOpacity: Dispatch<SetStateAction<number>>;
+  setWindowOpacity: (raw: unknown) => void;
   setAppIconVariant: Dispatch<SetStateAction<AppIconVariant>>;
   setAutoUpdateEnabled: Dispatch<SetStateAction<boolean>>;
+  setHttpNetworkProxy: Dispatch<SetStateAction<HttpNetworkProxySettings>>;
   setSftpAutoOpenSidebar: Dispatch<SetStateAction<boolean>>;
   setSftpFollowTerminalCwd: Dispatch<SetStateAction<boolean>>;
   setSftpDefaultViewMode: Dispatch<SetStateAction<'list' | 'tree'>>;
@@ -113,6 +122,7 @@ export function useSettingsIpcSync({
   setSessionLogsTimestampsEnabled,
   setSshDebugLogsEnabled,
   setSshDeepLinkEnabledState,
+  setJmsDeepLinkEnabledState,
   setHotkeyScheme,
   applyIncomingCustomKeyBindings,
   setIsHotkeyRecordingState,
@@ -120,6 +130,7 @@ export function useSettingsIpcSync({
   setWindowOpacity,
   setAppIconVariant,
   setAutoUpdateEnabled,
+  setHttpNetworkProxy,
   setSftpAutoOpenSidebar,
   setSftpFollowTerminalCwd,
   setSftpDefaultViewMode,
@@ -146,7 +157,7 @@ export function useSettingsIpcSync({
         key === STORAGE_KEY_ACCENT_MODE ||
         key === STORAGE_KEY_COLOR
       ) {
-        syncAppearanceFromStorage();
+        syncAppearanceFromStorage({ key, value });
         return;
       }
       if (key === STORAGE_KEY_UI_LANGUAGE && typeof value === 'string') {
@@ -218,6 +229,9 @@ export function useSettingsIpcSync({
       if (key === STORAGE_KEY_SSH_DEEP_LINK_ENABLED && typeof value === 'boolean') {
         setSshDeepLinkEnabledState(value);
       }
+      if (key === STORAGE_KEY_JMS_DEEP_LINK_ENABLED && typeof value === 'boolean') {
+        setJmsDeepLinkEnabledState(value);
+      }
       if (key === STORAGE_KEY_HOTKEY_SCHEME && (value === 'disabled' || value === 'mac' || value === 'pc')) {
         setHotkeyScheme(value);
       }
@@ -233,9 +247,8 @@ export function useSettingsIpcSync({
       if (key === STORAGE_KEY_GLOBAL_HOTKEY_ENABLED && typeof value === 'boolean') {
         setGlobalHotkeyEnabled((prev) => (prev === value ? prev : value));
       }
-      if (key === STORAGE_KEY_WINDOW_OPACITY && (typeof value === 'number' || typeof value === 'string')) {
-        const nextOpacity = clampWindowOpacity(value);
-        setWindowOpacity((prev) => (prev === nextOpacity ? prev : nextOpacity));
+      if (key === STORAGE_KEY_WINDOW_OPACITY) {
+        setWindowOpacity(value);
       }
       if (key === STORAGE_KEY_APP_ICON_VARIANT) {
         const nextVariant = resolveAppIconVariant(value);
@@ -243,6 +256,12 @@ export function useSettingsIpcSync({
       }
       if (key === STORAGE_KEY_AUTO_UPDATE_ENABLED && typeof value === 'boolean') {
         setAutoUpdateEnabled((prev) => (prev === value ? prev : value));
+      }
+      if (key === STORAGE_KEY_HTTP_NETWORK_PROXY) {
+        const next = normalizeHttpNetworkProxySettings(value);
+        setHttpNetworkProxy((prev) => (
+          areHttpNetworkProxySettingsEqual(prev, next) ? prev : next
+        ));
       }
       if (key === STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR && typeof value === 'boolean') {
         setSftpAutoOpenSidebar((prev) => (prev === value ? prev : value));
@@ -292,6 +311,7 @@ export function useSettingsIpcSync({
     applyIncomingCustomKeyBindings,
     mergeIncomingTerminalSettings,
     setAutoUpdateEnabled,
+    setHttpNetworkProxy,
     setEditorWordWrapState,
     setFollowAppTerminalThemeState,
     setGlobalHotkeyEnabled,
@@ -304,6 +324,7 @@ export function useSettingsIpcSync({
     setSessionLogsFormat,
     setSessionLogsTimestampsEnabled,
     setSshDeepLinkEnabledState,
+    setJmsDeepLinkEnabledState,
     setSshDebugLogsEnabled,
     setSftpAutoOpenSidebar,
     setSftpFollowTerminalCwd,

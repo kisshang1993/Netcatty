@@ -7,6 +7,7 @@ const {
   clearTerminalDataSession,
   createTerminalDataBacklog,
   createTerminalDataDispatcher,
+  hasPluginPipelineIngress,
 } = require("./preload/terminalDataBacklog.cjs");
 const {
   createTerminalOutputPortRegistry,
@@ -14,6 +15,9 @@ const {
 const {
   createTerminalUrgentInputPortRegistry,
 } = require("./preload/terminalUrgentInputPorts.cjs");
+const {
+  mergeTerminalDataMeta,
+} = require("./preload/terminalDataMeta.cjs");
 
 const dataListeners = new Map();
 const displayDataListeners = new Map();
@@ -33,11 +37,14 @@ const authFailedListeners = new Map();
 const telnetAutoLoginCompleteListeners = new Map();
 const telnetAutoLoginCancelledListeners = new Map();
 const telnetEchoModeListeners = new Map();
+const moshSessionReadyListeners = new Map();
 const languageChangeListeners = new Set();
 const fullscreenChangeListeners = new Set();
 const windowShownListeners = new Set();
+const windowFocusRequestedListeners = new Set();
 const windowWillHideListeners = new Set();
 const keyboardInteractiveListeners = new Set();
+const keyboardInteractiveCancelledListeners = new Set();
 const hostKeyVerificationListeners = new Set();
 const passphraseListeners = new Set();
 const passphraseTimeoutListeners = new Set();
@@ -73,23 +80,6 @@ const _mcpPendingMetas = new Map(); // sessionId -> metadata from filtered-empty
 const _mcpFlushTimers = new Map(); // sessionId -> delayed-flush timer
 const _mcpDroppingWrappedLine = new Set(); // sessionIds with a split marker echo line in progress
 
-function mergeTerminalDataMeta(first, second) {
-  const droppedOutputMayAffectTerminalState = Boolean(
-    first?.droppedOutputMayAffectTerminalState
-    || second?.droppedOutputMayAffectTerminalState
-  );
-  const droppedOutputAlternateScreenAction = second?.droppedOutputMayAffectTerminalState
-    ? second?.droppedOutputAlternateScreenAction
-    : (second?.droppedOutputAlternateScreenAction ?? first?.droppedOutputAlternateScreenAction);
-  if (!droppedOutputMayAffectTerminalState && !droppedOutputAlternateScreenAction) {
-    return undefined;
-  }
-  return {
-    ...(droppedOutputMayAffectTerminalState ? { droppedOutputMayAffectTerminalState: true } : {}),
-    ...(droppedOutputAlternateScreenAction ? { droppedOutputAlternateScreenAction } : {}),
-  };
-}
-
 // Returns true if `s` ends with a non-empty prefix of "__NCMCP_"
 // (i.e. the next chunk might complete it into a marker-containing line).
 function _endsWithMarkerPrefix(s) {
@@ -111,8 +101,12 @@ function filterMcpChunk(sessionId, chunk, meta) {
   // Prepend any buffered fragment from the previous chunk
   const held = _mcpLineBufs.get(sessionId) || "";
   const heldMeta = _mcpLineMetas.get(sessionId);
+  const heldIngressAlreadyAcknowledged = heldMeta?.pluginPipelineIngressBytes === 0;
   const pendingMeta = _mcpPendingMetas.get(sessionId);
-  const combinedMeta = mergeTerminalDataMeta(mergeTerminalDataMeta(pendingMeta, heldMeta), meta);
+  const stateMeta = mergeTerminalDataMeta(mergeTerminalDataMeta(pendingMeta, heldMeta), meta);
+  const sameChunkMeta = mergeTerminalDataMeta(mergeTerminalDataMeta(pendingMeta, heldMeta), meta, {
+    preserveTerminalPerf: true,
+  });
   const data = held + chunk;
   _mcpLineBufs.delete(sessionId);
   _mcpLineMetas.delete(sessionId);
@@ -120,7 +114,18 @@ function filterMcpChunk(sessionId, chunk, meta) {
 
   // Fast path: nothing suspicious in the combined data
   if (!_mcpDroppingWrappedLine.has(sessionId) && !data.includes("__NCMCP_") && !_endsWithMarkerPrefix(data)) {
-    return { data, meta: combinedMeta };
+    const deliveryMeta = held ? stateMeta : sameChunkMeta;
+    return {
+      data,
+      meta: heldIngressAlreadyAcknowledged
+        ? {
+            ...(deliveryMeta || {}),
+            pluginPipelineIngressBytes: Number.isFinite(meta?.pluginPipelineIngressBytes)
+              ? Math.max(0, Number(meta.pluginPipelineIngressBytes))
+              : chunk.length,
+          }
+        : deliveryMeta,
+    };
   }
 
   // Slow path: scan line by line
@@ -138,7 +143,11 @@ function filterMcpChunk(sessionId, chunk, meta) {
       const tail = data.slice(pos);
       if (droppedAny || tail.includes("__NCMCP_") || _endsWithMarkerPrefix(tail)) {
         _mcpLineBufs.set(sessionId, tail);
-        if (combinedMeta) _mcpLineMetas.set(sessionId, combinedMeta);
+        let tailMeta = !held && tail === chunk ? sameChunkMeta : stateMeta;
+        if (heldIngressAlreadyAcknowledged && !hasPluginPipelineIngress(tailMeta)) {
+          tailMeta = { ...(tailMeta || {}), pluginPipelineIngressBytes: 0 };
+        }
+        if (tailMeta) _mcpLineMetas.set(sessionId, tailMeta);
         if (droppedAny) _mcpDroppingWrappedLine.add(sessionId);
       } else {
         result += tail; // safe to display immediately
@@ -155,7 +164,26 @@ function filterMcpChunk(sessionId, chunk, meta) {
     pos = nlIdx + 1;
   }
 
-  return { data: result, meta: combinedMeta };
+  const deliveryMeta = !held && result === chunk ? sameChunkMeta : stateMeta;
+  return {
+    data: result,
+    meta: heldIngressAlreadyAcknowledged
+      ? {
+          ...(deliveryMeta || {}),
+          pluginPipelineIngressBytes: Number.isFinite(meta?.pluginPipelineIngressBytes)
+            ? Math.max(0, Number(meta.pluginPipelineIngressBytes))
+            : chunk.length,
+        }
+      : deliveryMeta,
+  };
+}
+
+function consumeBufferedMcpIngress(sessionId) {
+  const heldMeta = _mcpLineMetas.get(sessionId);
+  if (!hasPluginPipelineIngress(heldMeta)) return;
+  // Retain an explicit zero so a later safe flush does not fall back to the
+  // visible chunk length and acknowledge the already-credited prefix twice.
+  _mcpLineMetas.set(sessionId, { ...heldMeta, pluginPipelineIngressBytes: 0 });
 }
 
 /**
@@ -169,9 +197,9 @@ const _deliverToListeners = createTerminalDataDispatcher({
   shouldDropSession: (sessionId) => closedTerminalDataSessions.has(sessionId),
 });
 
-function scheduleMcpBufferedFlush(sessionId) {
-  if (!_mcpLineBufs.has(sessionId)) return;
-  _mcpFlushTimers.set(sessionId, setTimeout(() => {
+function flushMcpBufferedOutput(sessionId) {
+    const timer = _mcpFlushTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
     const held = _mcpLineBufs.get(sessionId);
     const heldMeta = _mcpLineMetas.get(sessionId);
     _mcpLineBufs.delete(sessionId);
@@ -183,15 +211,29 @@ function scheduleMcpBufferedFlush(sessionId) {
       return;
     }
     if (held) {
-      _deliverToListeners(sessionId, held, mergeTerminalDataMeta(_mcpPendingMetas.get(sessionId), heldMeta));
+      let deliveryMeta = mergeTerminalDataMeta(_mcpPendingMetas.get(sessionId), heldMeta, {
+        preserveTerminalPerf: true,
+      });
+      if (heldMeta?.pluginPipelineIngressBytes === 0 && !hasPluginPipelineIngress(deliveryMeta)) {
+        deliveryMeta = { ...(deliveryMeta || {}), pluginPipelineIngressBytes: 0 };
+      }
+      _deliverToListeners(sessionId, held, deliveryMeta);
       _mcpPendingMetas.delete(sessionId);
     }
-  }, 80));
+}
+
+function scheduleMcpBufferedFlush(sessionId) {
+  if (!_mcpLineBufs.has(sessionId)) return;
+  _mcpFlushTimers.set(sessionId, setTimeout(() => flushMcpBufferedOutput(sessionId), 80));
 }
 
 function deliverTerminalData(sessionId, data, options = {}) {
-  if (!sessionId || !data) return;
+  if (!sessionId || (!data && !hasPluginPipelineIngress(options.meta))) return;
   if (closedTerminalDataSessions.has(sessionId)) return;
+  if (!data) {
+    _deliverToListeners(sessionId, "", options.meta);
+    return;
+  }
   if (options.syntheticEcho) {
     _deliverToListeners(sessionId, data, options.meta);
     return;
@@ -199,8 +241,17 @@ function deliverTerminalData(sessionId, data, options = {}) {
   const filtered = filterMcpChunk(sessionId, data, options.meta);
   if (filtered?.data) {
     _deliverToListeners(sessionId, filtered.data, filtered.meta);
+    if (hasPluginPipelineIngress(filtered.meta)) consumeBufferedMcpIngress(sessionId);
   } else if (filtered?.meta) {
-    _mcpPendingMetas.set(sessionId, mergeTerminalDataMeta(_mcpPendingMetas.get(sessionId), filtered.meta));
+    if (hasPluginPipelineIngress(filtered.meta)) {
+      // The legacy path must return flow credit even when MCP marker filtering
+      // removes every display byte. Waiting for unrelated visible output can
+      // otherwise leave a fully suppressed stream paused indefinitely.
+      _deliverToListeners(sessionId, "", filtered.meta);
+      consumeBufferedMcpIngress(sessionId);
+    } else {
+      _mcpPendingMetas.set(sessionId, mergeTerminalDataMeta(_mcpPendingMetas.get(sessionId), filtered.meta));
+    }
   }
   // If there is buffered content waiting for more data (e.g. a prompt
   // right after a dropped marker line), schedule a delayed flush so it
@@ -208,19 +259,32 @@ function deliverTerminalData(sessionId, data, options = {}) {
   scheduleMcpBufferedFlush(sessionId);
 }
 
+const terminalOutputDrainListeners = new Map();
 const terminalOutputPorts = createTerminalOutputPortRegistry({
   ipcRenderer,
   deliverToListeners: _deliverToListeners,
   filterData(sessionId, data, message) {
     if (message?.syntheticEcho) return data;
     const filtered = filterMcpChunk(sessionId, data, message.meta);
-    if (!filtered?.data && filtered?.meta) {
+    // Metadata-only plugin output is delivered immediately by the output-port
+    // registry so renderer flow credit can be returned. Do not retain the same
+    // ingress metadata for the next visible chunk or it would be acknowledged
+    // twice. Non-ingress terminal-state metadata still follows the next output.
+    if (hasPluginPipelineIngress(filtered?.meta)) {
+      consumeBufferedMcpIngress(sessionId);
+    } else if (!filtered?.data && filtered?.meta) {
       _mcpPendingMetas.set(sessionId, mergeTerminalDataMeta(_mcpPendingMetas.get(sessionId), filtered.meta));
     }
     scheduleMcpBufferedFlush(sessionId);
     return filtered;
   },
   closedTerminalDataSessions,
+  onDrain(sessionId, requestId) {
+    flushMcpBufferedOutput(sessionId);
+    for (const listener of terminalOutputDrainListeners.get(sessionId) || []) {
+      try { listener({ sessionId, requestId }); } catch (err) { console.error("Terminal drain callback failed", err); }
+    }
+  },
 });
 terminalOutputPorts.register();
 
@@ -229,8 +293,12 @@ const terminalUrgentInputPorts = createTerminalUrgentInputPortRegistry({
 });
 terminalUrgentInputPorts.register();
 
-// ZMODEM file transfer events
+// ZMODEM file transfer events. Listener sets are owned by renderer subscribers
+// (disposed on unmount); delivery is gated by closedTerminalDataSessions so
+// events stop after exit/close and resume automatically when a session
+// restarts with the same id.
 ipcRenderer.on("netcatty:zmodem:detect", (_event, payload) => {
+  if (closedTerminalDataSessions.has(payload.sessionId)) return;
   const set = zmodemListeners.get(payload.sessionId);
   if (!set) return;
   set.forEach((cb) => { try { cb({ type: "detect", ...payload }); } catch {} });
@@ -250,21 +318,25 @@ ipcRenderer.on("netcatty:window:terminalPopupConfig", (_event, payload) => {
   });
 });
 ipcRenderer.on("netcatty:zmodem:progress", (_event, payload) => {
+  if (closedTerminalDataSessions.has(payload.sessionId)) return;
   const set = zmodemListeners.get(payload.sessionId);
   if (!set) return;
   set.forEach((cb) => { try { cb({ type: "progress", ...payload }); } catch {} });
 });
 ipcRenderer.on("netcatty:zmodem:complete", (_event, payload) => {
+  if (closedTerminalDataSessions.has(payload.sessionId)) return;
   const set = zmodemListeners.get(payload.sessionId);
   if (!set) return;
   set.forEach((cb) => { try { cb({ type: "complete", ...payload }); } catch {} });
 });
 ipcRenderer.on("netcatty:zmodem:error", (_event, payload) => {
+  if (closedTerminalDataSessions.has(payload.sessionId)) return;
   const set = zmodemListeners.get(payload.sessionId);
   if (!set) return;
   set.forEach((cb) => { try { cb({ type: "error", ...payload }); } catch {} });
 });
 ipcRenderer.on("netcatty:zmodem:overwrite-request", (_event, payload) => {
+  if (closedTerminalDataSessions.has(payload.sessionId)) return;
   const set = zmodemOverwriteListeners.get(payload.sessionId);
   if (set) set.forEach((cb) => cb(payload));
 });
@@ -276,6 +348,10 @@ ipcRenderer.on("netcatty:data", (_event, payload) => {
   });
 });
 
+// ZMODEM listener sets deliberately survive exit: they are owned by renderer
+// subscribers and disposed on unmount. Delivery is gated by
+// closedTerminalDataSessions (see zmodem handlers above), so events stop after
+// exit/close and resume when a session restarts with the same id.
 ipcRenderer.on("netcatty:exit", (_event, payload) => {
   const sessionId = payload?.sessionId;
   if (!sessionId) return;
@@ -296,8 +372,7 @@ ipcRenderer.on("netcatty:exit", (_event, payload) => {
   telnetAutoLoginCompleteListeners.delete(sessionId);
   telnetAutoLoginCancelledListeners.delete(sessionId);
   telnetEchoModeListeners.delete(sessionId);
-  zmodemListeners.delete(sessionId);
-  zmodemOverwriteListeners.delete(sessionId);
+  moshSessionReadyListeners.delete(sessionId);
   const pendingTimer = _mcpFlushTimers.get(sessionId);
   if (pendingTimer) {
     clearTimeout(pendingTimer);
@@ -373,6 +448,16 @@ ipcRenderer.on("netcatty:window:shown", () => {
   });
 });
 
+ipcRenderer.on("netcatty:window:focus-requested", () => {
+  windowFocusRequestedListeners.forEach((cb) => {
+    try {
+      cb();
+    } catch (err) {
+      console.error("Window focus-requested callback failed", err);
+    }
+  });
+});
+
 ipcRenderer.on("netcatty:window:will-hide", () => {
   windowWillHideListeners.forEach((cb) => {
     try {
@@ -423,6 +508,18 @@ ipcRenderer.on("netcatty:telnet:auto-login-cancelled", (_event, payload) => {
   });
 });
 
+ipcRenderer.on("netcatty:mosh:ready", (_event, payload) => {
+  const set = moshSessionReadyListeners.get(payload.sessionId);
+  if (!set) return;
+  set.forEach((cb) => {
+    try {
+      cb(payload);
+    } catch (err) {
+      console.error("Mosh session ready callback failed", err);
+    }
+  });
+});
+
 ipcRenderer.on("netcatty:telnet:echo-mode", (_event, payload) => {
   const set = telnetEchoModeListeners.get(payload.sessionId);
   if (!set) return;
@@ -442,6 +539,16 @@ ipcRenderer.on("netcatty:keyboard-interactive", (_event, payload) => {
       cb(payload);
     } catch (err) {
       console.error("Keyboard-interactive callback failed", err);
+    }
+  });
+});
+
+ipcRenderer.on("netcatty:keyboard-interactive-cancelled", (_event, payload) => {
+  keyboardInteractiveCancelledListeners.forEach((cb) => {
+    try {
+      cb(payload);
+    } catch (err) {
+      console.error("Keyboard-interactive cancellation callback failed", err);
     }
   });
 });
@@ -567,7 +674,15 @@ ipcRenderer.on("netcatty:transfer:progress", (_event, payload) => {
   const cb = transferProgressListeners.get(payload.transferId);
   if (cb) {
     try {
-      cb(payload.transferred, payload.totalBytes, payload.speed);
+      cb(payload.transferred, payload.totalBytes, payload.speed, {
+        resumeStage: payload.resumeStage,
+        checkpointBytes: payload.checkpointBytes,
+        downloadCheckpointBytes: payload.downloadCheckpointBytes,
+        uploadCheckpointBytes: payload.uploadCheckpointBytes,
+        sourceFingerprint: payload.sourceFingerprint,
+        resumable: payload.resumable,
+        pauseUnavailableReason: payload.pauseUnavailableReason,
+      });
     } catch (err) {
       console.error("Transfer progress callback failed", err);
     }
@@ -776,14 +891,18 @@ const api = createPreloadApi({
   telnetAutoLoginCompleteListeners,
   telnetAutoLoginCancelledListeners,
   telnetEchoModeListeners,
+  moshSessionReadyListeners,
   terminalDataBacklog,
   terminalOutputPorts,
+  terminalOutputDrainListeners,
   terminalUrgentInputPorts,
   languageChangeListeners,
   fullscreenChangeListeners,
   windowShownListeners,
+  windowFocusRequestedListeners,
   windowWillHideListeners,
   keyboardInteractiveListeners,
+  keyboardInteractiveCancelledListeners,
   hostKeyVerificationListeners,
   passphraseListeners,
   passphraseTimeoutListeners,

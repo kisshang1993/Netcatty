@@ -5,7 +5,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { I18nProvider } from "../../application/i18n/I18nProvider.tsx";
 import type { ChatMessage } from "../../infrastructure/ai/types.ts";
-import ChatMessageList, { shouldProvideVaultArtifactNavigation } from "./ChatMessageList.tsx";
+import type { ApprovalRequest } from "../../infrastructure/ai/shared/approvalGate.ts";
+import ChatMessageList, {
+  buildCodexApprovalRenderPlan,
+  shouldProvideVaultArtifactNavigation,
+} from "./ChatMessageList.tsx";
 import { TooltipProvider } from "../ui/tooltip.tsx";
 
 const makeMessage = (index: number): ChatMessage => ({
@@ -34,6 +38,69 @@ test("ChatMessageList only renders the recent message batch by default", () => {
   assert.doesNotMatch(markup, /message-0/);
   assert.match(markup, /message-10/);
   assert.match(markup, /message-59/);
+});
+
+test("ChatMessageList renders Codex activities and actual usage", () => {
+  const messages: ChatMessage[] = [{
+    id: "assistant-activity",
+    role: "assistant",
+    content: "Done",
+    timestamp: 1,
+    agentActivities: [
+      {
+        id: "plan-1",
+        type: "plan_update",
+        status: "running",
+        items: [{ text: "Map Codex events", completed: false }],
+      },
+      {
+        id: "search-1",
+        type: "web_search",
+        status: "completed",
+        query: "Codex SDK event types",
+      },
+      {
+        id: "patch-1",
+        type: "file_change",
+        status: "completed",
+        changes: [{ path: "src/app.ts", kind: "update" }],
+      },
+      {
+        id: "warning-1",
+        type: "warning",
+        status: "completed",
+        message: "A recoverable warning",
+      },
+    ],
+    usage: {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      outputTokens: 25,
+      reasoningTokens: 10,
+      totalTokens: 125,
+    },
+  }];
+
+  const markup = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      { locale: "en" },
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(ChatMessageList, { messages, isStreaming: true }),
+      ),
+    ),
+  );
+
+  assert.match(markup, /Agent activity/);
+  assert.match(markup, /Map Codex events/);
+  assert.match(markup, /Codex SDK event types/);
+  assert.match(markup, /src\/app\.ts/);
+  assert.match(markup, /A recoverable warning/);
+  assert.match(markup, /Tokens 125/);
+  assert.match(markup, /cached 40/);
+  assert.match(markup, /reasoning 10/);
 });
 
 test("ChatMessageList renders external MCP vault tool results as artifact cards", () => {
@@ -322,4 +389,49 @@ test("ChatMessageList wires vault artifact navigation when only note open is ava
 
 test("ChatMessageList leaves vault artifact navigation disabled without open actions", () => {
   assert.equal(shouldProvideVaultArtifactNavigation({}), false);
+});
+
+test("Codex approval render plan preserves every approval for the same item", () => {
+  const codexRequest = (
+    toolCallId: string,
+    itemId: string,
+    command: string,
+    chatSessionId = "chat-1",
+  ): ApprovalRequest => ({
+    toolCallId,
+    itemId,
+    toolName: "codex.command",
+    args: { command },
+    chatSessionId,
+    source: "codex-app-server",
+    approvalType: "command",
+    allowSession: false,
+  });
+  const pendingApprovals = new Map<string, ApprovalRequest>([
+    ["approval-1", codexRequest("approval-1", "item-1", "echo one")],
+    ["approval-2", codexRequest("approval-2", "item-1", "echo two")],
+    ["approval-3", codexRequest("approval-3", "item-2", "echo standalone")],
+    ["approval-other-session", codexRequest("approval-other-session", "item-1", "echo hidden", "chat-2")],
+    ["regular-approval", {
+      toolCallId: "regular-approval",
+      toolName: "terminal_execute",
+      args: { command: "pwd" },
+      chatSessionId: "chat-1",
+    }],
+  ]);
+
+  const plan = buildCodexApprovalRenderPlan(
+    pendingApprovals,
+    new Set(["item-1"]),
+    "chat-1",
+  );
+
+  assert.deepEqual(
+    plan.byItemId.get("item-1")?.map(({ approvalId }) => approvalId),
+    ["approval-1", "approval-2"],
+  );
+  assert.deepEqual(
+    plan.standalone.map(({ approvalId }) => approvalId),
+    ["approval-3"],
+  );
 });

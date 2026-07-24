@@ -62,6 +62,22 @@ declare global {
     clearTempDir?(): Promise<{ deletedCount: number; failedCount: number; error?: string }>;
     getTempDirPath?(): Promise<string>;
     openTempDir?(): Promise<{ success: boolean }>;
+    getToolOutputPersistenceStatus?(): Promise<{ durable: boolean; reason?: string }>;
+    writeToolOutputTemp?(record: import('../../infrastructure/ai/harness/toolOutputStore').PersistedToolOutputRecord, content: string): Promise<{ ok: boolean; path?: string; manifestPath?: string; error?: string }>;
+    restoreToolOutputTemp?(handleId: string, chatSessionId: string): Promise<{
+      path: string;
+      record: import('../../infrastructure/ai/harness/toolOutputStore').PersistedToolOutputRecord;
+    } | null>;
+    readToolOutputTemp?(filePath: string, request?: {
+      mode?: 'head' | 'tail' | 'full' | 'range' | 'search';
+      maxChars?: number;
+      offset?: number;
+      query?: string;
+    }): Promise<unknown | null>;
+    deleteToolOutputTemp?(filePath: string): Promise<{ ok: boolean }>;
+    deleteChatToolOutputsTemp?(chatSessionId: string): Promise<{ deletedCount: number }>;
+    deleteTerminalToolOutputsTemp?(chatSessionId: string, terminalSessionId: string): Promise<{ deletedCount: number }>;
+    deleteTerminalToolOutputsEverywhereTemp?(terminalSessionId: string): Promise<{ deletedCount: number }>;
 
     // Session Logs
     exportSessionLog?(payload: {
@@ -86,6 +102,8 @@ declare global {
       sessionId: string;
       sessionName?: string;
       preferredDirectory?: string;
+      format?: 'txt' | 'raw' | 'html';
+      timestampsEnabled?: boolean;
       initialLine?: string;
     }): Promise<{ success: boolean; started: boolean; canceled?: boolean; error?: string; filePath?: string }>;
     stopManualSessionLog?(payload: {

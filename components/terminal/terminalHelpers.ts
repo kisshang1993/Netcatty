@@ -19,6 +19,7 @@ import type {
   TerminalSettings,
   TerminalTheme,
 } from "../../types";
+import type { KittyKeyboardBroadcastInput } from "./runtime/kittyKeyboardBroadcast";
 
 export const MAX_CONNECTION_LOG_DATA_CHARS = 1_000_000;
 export const AUTO_RUN_SNIPPET_LINE_DELAY_MS = 250;
@@ -26,6 +27,8 @@ export const AUTO_RUN_SNIPPET_LINE_DELAY_MS = 250;
 export interface TerminalBroadcastInputOptions {
   noAutoRun?: boolean;
   lineDelayMs?: number;
+  kittyKeyboardInput?: KittyKeyboardBroadcastInput;
+  kittyKeyboardTargetSessionIds?: string[];
 }
 
 export { resolveSessionTabTitle };
@@ -124,6 +127,7 @@ export interface TerminalProps {
   customAccent?: string;
   terminalSettings?: TerminalSettings;
   sessionId: string;
+  workspaceId?: string;
   restoreState?: TerminalSession["restoreState"];
   shellType?: TerminalSession["shellType"];
   lastCwd?: string;
@@ -137,6 +141,16 @@ export interface TerminalProps {
   // source session whose authenticated connection should be reused for a new
   // shell channel — skipping a second MFA prompt (issue #1204).
   reuseConnectionFromSessionId?: string;
+  /**
+   * Attach to an already-running backend session (same PTY) instead of starting
+   * a new one. Used by the AI silent-session observe popup. Must not close the
+   * backend session on unmount.
+   */
+  attachExistingSession?: boolean;
+  /** Ephemeral grant required for attach-session IPC. */
+  attachAuthorization?: string;
+  /** Registers the async handoff that must finish before an attach popup closes. */
+  onAttachClosePreparationChange?: (prepare: (() => Promise<void>) | null) => void;
   serialConfig?: SerialConfig;
   hotkeyScheme?: "disabled" | "mac" | "pc";
   disableTerminalFontZoom?: boolean;
@@ -188,7 +202,7 @@ export interface TerminalProps {
     data: string,
     sourceSessionId: string,
     options?: TerminalBroadcastInputOptions,
-  ) => void;
+  ) => string[] | void;
   onSnippetExecutorChange?: (
     sessionId: string,
     executor: ((
@@ -205,9 +219,11 @@ export interface TerminalProps {
     sessionId: string,
     queueRewrite: ((rewrite: ProgrammaticCommandLogRewrite) => void) | null,
   ) => void;
-  sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean };
+  sessionLog?: { enabled: boolean; directory: string; format: "txt" | "raw" | "html"; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
   sudoAutofillPassword?: string;
+  /** Host + keychain password identities for picker mode (#2156). */
+  sudoAutofillCandidates?: import("./runtime/terminalSudoAutofill").SudoPasswordAutofillCandidate[];
   showSelectionAIAction?: boolean;
   onAddSelectionToAI?: (sessionId: string, selection: string) => void;
   /** Override display name for the pane title bar (customName || hostLabel) */

@@ -8,6 +8,7 @@ import {
 import { createPromptLineBreakState } from "./promptLineBreak";
 import { resolveStartupCommand } from "./terminalStartupCommands";
 import { pasteTextIntoTerminal } from "./terminalUserPaste";
+import { shouldSuppressHostStartupCommandOnReconnect } from "../restoredSessionGate";
 
 const noop = () => undefined;
 const ENCRYPTED_CREDENTIAL_PLACEHOLDER = "enc:v1:djEwAAAA";
@@ -79,6 +80,319 @@ test("getMissingChainHostIds reports unresolved jump hosts", () => {
     ),
     ["jump-2"],
   );
+});
+
+test("startSSH forwards imported system agent authentication settings", async () => {
+  let capturedOptions: Record<string, unknown> | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "ssh-session";
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "aws-sg",
+      hostname: "1.1.1.1",
+      username: "root",
+      port: 2222,
+      useSshAgent: true,
+      identityAgent: "$SSH_AUTH_SOCK",
+      identityFilePaths: ["~/.ssh/aws_root"],
+      identitiesOnly: true,
+      addKeysToAgent: "yes",
+      useKeychain: true,
+    },
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.deepEqual(
+    capturedOptions && {
+      useSshAgent: capturedOptions.useSshAgent,
+      identityAgent: capturedOptions.identityAgent,
+      identityFilePaths: capturedOptions.identityFilePaths,
+      identitiesOnly: capturedOptions.identitiesOnly,
+      addKeysToAgent: capturedOptions.addKeysToAgent,
+      useKeychain: capturedOptions.useKeychain,
+    },
+    {
+      useSshAgent: true,
+      identityAgent: "$SSH_AUTH_SOCK",
+      identityFilePaths: ["~/.ssh/aws_root"],
+      identitiesOnly: true,
+      addKeysToAgent: "yes",
+      useKeychain: true,
+    },
+  );
+});
+
+test("startSSH tells the bridge to skip shell discovery for network devices", async () => {
+  let capturedOptions: Record<string, unknown> | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "ssh-session";
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    isNetworkDevice: true,
+    reuseConnectionFromSessionId: "source-session",
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(capturedOptions?.sourceSessionId, "source-session");
+  assert.equal(capturedOptions?.skipShellPidDiscovery, true);
+});
+
+test("startSSH uses the system agent when a synced vault key cannot be decrypted", async () => {
+  let capturedOptions: Record<string, unknown> | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "ssh-session";
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "Agent host",
+      hostname: "agent.example.test",
+      username: "root",
+      authMethod: "key",
+      identityFileId: "key-1",
+      useSshAgent: true,
+    },
+    keys: [{
+      id: "key-1",
+      label: "Synced key",
+      type: "ED25519",
+      publicKey: "ssh-ed25519 AAAASELECTED",
+      privateKey: "enc:v1:djEwAAAA",
+      source: "imported",
+      category: "key",
+      created: 1,
+    }],
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(capturedOptions?.useSshAgent, true);
+  assert.deepEqual(capturedOptions?.agentPublicKeys, ["ssh-ed25519 AAAASELECTED"]);
+  assert.equal(capturedOptions?.privateKey, undefined);
+});
+
+for (const protocol of ["Mosh", "ET"] as const) {
+  test(`${protocol} keeps certificate signing material when the system agent toggle is also enabled`, async () => {
+    let capturedOptions: Record<string, unknown> | null = null;
+    const terminalBackend = {
+      backendAvailable: () => true,
+      moshAvailable: () => true,
+      etAvailable: () => true,
+      startMoshSession: async (options: Record<string, unknown>) => {
+        capturedOptions = options;
+        return "mosh-session";
+      },
+      startEtSession: async (options: Record<string, unknown>) => {
+        capturedOptions = options;
+        return "et-session";
+      },
+      onSessionData: () => noop,
+      onSessionExit: () => noop,
+      writeToSession: noop,
+      resizeSession: noop,
+    };
+    const ctx = createStarterContext({
+      host: {
+        id: "host-1",
+        label: "Certificate host",
+        hostname: "cert.example.test",
+        username: "alice",
+        authMethod: "certificate",
+        identityFileId: "cert-key",
+        useSshAgent: true,
+      },
+      keys: [{
+        id: "cert-key",
+        label: "Certificate key",
+        type: "ED25519",
+        category: "key",
+        source: "imported",
+        created: 1,
+        privateKey: "PRIVATE KEY",
+        certificate: "ssh-ed25519-cert-v01@openssh.com AAAATEST",
+      }],
+      terminalBackend,
+    });
+
+    const starters = createTerminalSessionStarters(ctx as never);
+    if (protocol === "Mosh") await starters.startMosh(createTermStub() as never);
+    else await starters.startEt(createTermStub() as never);
+
+    assert.equal(capturedOptions?.privateKey, "PRIVATE KEY");
+    assert.equal(capturedOptions?.certificate, "ssh-ed25519-cert-v01@openssh.com AAAATEST");
+    assert.equal(capturedOptions?.useSshAgent, false);
+  });
+}
+
+for (const protocol of ["Mosh", "ET"] as const) {
+  test(`${protocol} keeps an imported private key when agent filtering is unavailable`, async () => {
+    let capturedOptions: Record<string, unknown> | null = null;
+    const terminalBackend = {
+      backendAvailable: () => true,
+      moshAvailable: () => true,
+      etAvailable: () => true,
+      startMoshSession: async (options: Record<string, unknown>) => {
+        capturedOptions = options;
+        return "mosh-session";
+      },
+      startEtSession: async (options: Record<string, unknown>) => {
+        capturedOptions = options;
+        return "et-session";
+      },
+      onSessionData: () => noop,
+      onSessionExit: () => noop,
+      writeToSession: noop,
+      resizeSession: noop,
+    };
+    const ctx = createStarterContext({
+      host: {
+        id: "host-1",
+        label: "Imported key host",
+        hostname: "key.example.test",
+        username: "alice",
+        authMethod: "key",
+        identityFileId: "key-1",
+        useSshAgent: true,
+      },
+      keys: [{
+        id: "key-1",
+        label: "Imported key",
+        type: "ED25519",
+        category: "key",
+        source: "imported",
+        created: 1,
+        privateKey: "PRIVATE KEY",
+        passphrase: "key-passphrase",
+      }],
+      terminalBackend,
+    });
+
+    const starters = createTerminalSessionStarters(ctx as never);
+    if (protocol === "Mosh") await starters.startMosh(createTermStub() as never);
+    else await starters.startEt(createTermStub() as never);
+
+    assert.equal(capturedOptions?.useSshAgent, false);
+    assert.equal(capturedOptions?.privateKey, "PRIVATE KEY");
+    assert.equal(capturedOptions?.passphrase, "key-passphrase");
+  });
+}
+
+for (const protocol of ["Mosh", "ET"] as const) {
+  test(`${protocol} keeps automatic key discovery available with an unreadable saved password`, async () => {
+    let capturedOptions: Record<string, unknown> | null = null;
+    let needsAuth = false;
+    const terminalBackend = {
+      backendAvailable: () => true,
+      moshAvailable: () => true,
+      etAvailable: () => true,
+      startMoshSession: async (options: Record<string, unknown>) => {
+        capturedOptions = options;
+        return "mosh-session";
+      },
+      startEtSession: async (options: Record<string, unknown>) => {
+        capturedOptions = options;
+        return "et-session";
+      },
+      onSessionData: () => noop,
+      onSessionExit: () => noop,
+      writeToSession: noop,
+      resizeSession: noop,
+    };
+    const ctx = createStarterContext({
+      host: {
+        id: "host-1",
+        label: "Automatic host",
+        hostname: "auto.example.test",
+        username: "alice",
+        authMethod: "auto",
+        password: ENCRYPTED_CREDENTIAL_PLACEHOLDER,
+      },
+      terminalBackend,
+      setNeedsAuth: (value: boolean) => { needsAuth = value; },
+    });
+
+    const starters = createTerminalSessionStarters(ctx as never);
+    if (protocol === "Mosh") await starters.startMosh(createTermStub() as never);
+    else await starters.startEt(createTermStub() as never);
+
+    assert.equal(needsAuth, false);
+    assert.equal(capturedOptions?.authMethod, "auto");
+    assert.equal(capturedOptions?.password, undefined);
+  });
+}
+
+test("ET keeps automatic jump discovery available with an unreadable saved password", async () => {
+  let capturedOptions: Record<string, unknown> | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    etAvailable: () => true,
+    startEtSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "et-session";
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "Target",
+      hostname: "target.example.test",
+      username: "alice",
+      authMethod: "auto",
+    },
+    resolvedChainHosts: [{
+      id: "jump-1",
+      label: "Jump",
+      hostname: "jump.example.test",
+      username: "ops",
+      authMethod: "auto",
+      password: ENCRYPTED_CREDENTIAL_PLACEHOLDER,
+    }],
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startEt(createTermStub() as never);
+
+  const jumpHosts = capturedOptions?.jumpHosts as Array<Record<string, unknown>> | undefined;
+  assert.equal(jumpHosts?.[0]?.authMethod, "auto");
+  assert.equal(jumpHosts?.[0]?.password, undefined);
 });
 
 test("startSSH forwards custom ProxyCommand to the SSH bridge", async () => {
@@ -253,6 +567,8 @@ test("startSSH resolves jump host proxy credentials from an identity", async () 
       label: "Target",
       hostname: "target.example.test",
       username: "alice",
+      sshTcpConnectTimeoutSeconds: 50,
+      sshAuthReadyTimeoutSeconds: 240,
       hostChain: { hostIds: ["jump-1"] },
     },
     resolvedChainHosts: [{
@@ -260,6 +576,9 @@ test("startSSH resolves jump host proxy credentials from an identity", async () 
       label: "Jump",
       hostname: "jump.example.test",
       username: "jump",
+      requiresMfa: true,
+      sshTcpConnectTimeoutSeconds: 75,
+      sshAuthReadyTimeoutSeconds: 360,
       proxyConfig: {
         type: "socks5",
         host: "jump-proxy.example.test",
@@ -287,6 +606,211 @@ test("startSSH resolves jump host proxy credentials from an identity", async () 
     username: "proxy-user",
     password: "proxy-secret",
   });
+  assert.equal(capturedOptions?.sshTcpConnectTimeoutMs, 50_000);
+  assert.equal(capturedOptions?.sshAuthReadyTimeoutMs, 240_000);
+  assert.equal(jumpHosts[0]?.requiresMfa, true);
+  assert.equal(jumpHosts[0]?.sshTcpConnectTimeoutMs, 75_000);
+  assert.equal(jumpHosts[0]?.sshAuthReadyTimeoutMs, 360_000);
+});
+
+test("startSSH shows jump-host auth failures without opening target auth retry", async () => {
+  let error = "";
+  let needsAuth = false;
+  let retryMessage: string | null = "previous retry";
+  let status = "";
+  const progressLogs: string[] = [];
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => {
+      const err = new Error('Jump host authentication failed for "Bastion": All configured authentication methods failed');
+      (err as Error & { isJumpHostAuthError?: boolean }).isJumpHostAuthError = true;
+      throw err;
+    },
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    terminalBackend,
+    host: {
+      id: "host-1",
+      label: "Target",
+      hostname: "target.example.test",
+      username: "alice",
+      hostChain: { hostIds: ["jump-1"] },
+    },
+    resolvedChainHosts: [{
+      id: "jump-1",
+      label: "Bastion",
+      hostname: "bastion.example.test",
+      username: "jump",
+      password: "wrong-secret",
+    }],
+    setError: (message: string) => { error = message; },
+    setNeedsAuth: (value: boolean) => { needsAuth = value; },
+    setAuthRetryMessage: (message: string | null) => { retryMessage = message; },
+    setStatus: (next: string) => { status = next; },
+    updateStatus: (next: string) => { status = next; },
+    setProgressLogs: (next: string[] | ((prev: string[]) => string[])) => {
+      if (typeof next === "function") {
+        progressLogs.splice(0, progressLogs.length, ...next(progressLogs));
+      } else {
+        progressLogs.splice(0, progressLogs.length, ...next);
+      }
+    },
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(needsAuth, false);
+  assert.equal(retryMessage, null);
+  assert.equal(status, "disconnected");
+  assert.match(error, /Jump host authentication failed for "Bastion"/);
+  assert.equal(progressLogs.some((line) => /Authentication failed\. Please try again/.test(line)), false);
+});
+
+test("startSSH recognizes Electron-prefixed jump-host auth failures", async () => {
+  let error = "";
+  let needsAuth = false;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => {
+      throw new Error(
+        'Error invoking remote method "netcatty:start": Error: Jump host authentication failed for "Bastion": All configured authentication methods failed',
+      );
+    },
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    terminalBackend,
+    setNeedsAuth: (value: boolean) => { needsAuth = value; },
+    setError: (message: string) => { error = message; },
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(needsAuth, false);
+  assert.match(error, /Jump host authentication failed for "Bastion"/);
+});
+
+test("startSSH does not open auth retry for socket errors mentioning auth in hostnames", async () => {
+  let error = "";
+  let needsAuth = false;
+  let retryMessage: string | null = "previous retry";
+  let status = "";
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => {
+      const err = new Error("Connection reset by auth-bastion.example.com");
+      throw err;
+    },
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    terminalBackend,
+    host: {
+      id: "host-1",
+      label: "Target",
+      hostname: "target.example.test",
+      username: "alice",
+      hostChain: { hostIds: ["jump-1"] },
+    },
+    resolvedChainHosts: [{
+      id: "jump-1",
+      label: "Auth Bastion",
+      hostname: "auth-bastion.example.com",
+      username: "jump",
+      password: "secret",
+    }],
+    setError: (message: string) => { error = message; },
+    setNeedsAuth: (value: boolean) => { needsAuth = value; },
+    setAuthRetryMessage: (message: string | null) => { retryMessage = message; },
+    setStatus: (next: string) => { status = next; },
+    updateStatus: (next: string) => { status = next; },
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(needsAuth, false);
+  assert.equal(retryMessage, null);
+  assert.equal(status, "disconnected");
+  assert.equal(error, "Connection reset by auth-bastion.example.com");
+});
+
+test("startSSH does not open auth retry for non-login permission denied errors", async () => {
+  let needsAuth = false;
+  let error = "";
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => {
+      throw new Error("Permission denied opening channel to auth-bastion.example.com");
+    },
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    terminalBackend,
+    setNeedsAuth: (value: boolean) => { needsAuth = value; },
+    setError: (message: string) => { error = message; },
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(needsAuth, false);
+  assert.equal(error, "Permission denied opening channel to auth-bastion.example.com");
 });
 
 test("startSSH rejects missing saved proxy profiles before connecting", async () => {
@@ -872,6 +1396,7 @@ test("startSSH resets the TCP dial timeout state before password fallback", asyn
     error?: string,
   ) => void = noop;
   let startCalls = 0;
+  const startOptions: Record<string, unknown>[] = [];
   const tcpDialState: boolean[] = [];
   const terminalBackend = {
     backendAvailable: () => true,
@@ -880,8 +1405,9 @@ test("startSSH resets the TCP dial timeout state before password fallback", asyn
     localAvailable: () => true,
     serialAvailable: () => true,
     execAvailable: () => true,
-    startSSHSession: async () => {
+    startSSHSession: async (options: Record<string, unknown>) => {
       startCalls += 1;
+      startOptions.push(options);
       if (startCalls === 1) {
         chainProgressListener("session-1", 1, 1, "target.example.test", "tcp-connected");
         throw new Error("Authentication failed");
@@ -912,6 +1438,7 @@ test("startSSH resets the TCP dial timeout state before password fallback", asyn
       authMethod: "key",
       identityFileId: "key-1",
       password: "login-secret",
+      useSshAgent: true,
     },
     keys: [{
       id: "key-1",
@@ -929,6 +1456,8 @@ test("startSSH resets the TCP dial timeout state before password fallback", asyn
   await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
 
   assert.equal(startCalls, 2);
+  assert.equal(startOptions[0]?.useSshAgent, false);
+  assert.equal(startOptions[1]?.useSshAgent, false);
   assert.deepEqual(tcpDialState, [false, false, true, false]);
 });
 
@@ -1438,6 +1967,49 @@ test("local session captures paste cleanup writes in terminal log data", async (
   assert.deepEqual(capturedLogData, ["line 3 with enough content", "\x1b[K"]);
 });
 
+test("local session acknowledges metadata-only plugin output immediately", async () => {
+  let onData: ((data: string, meta?: { pluginPipelineIngressBytes?: number }) => void) | null = null;
+  const acknowledgements: Array<{ sessionId: string; bytes: number }> = [];
+  const paused: Array<{ sessionId: string; paused: boolean }> = [];
+  const terminalBackend = {
+    localAvailable: () => true,
+    startLocalSession: async () => "local-session",
+    onSessionData: (
+      _id: string,
+      cb: (data: string, meta?: { pluginPipelineIngressBytes?: number }) => void,
+    ) => {
+      onData = cb;
+      return noop;
+    },
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+    ackSessionFlow: (sessionId: string, bytes: number) => {
+      acknowledgements.push({ sessionId, bytes });
+    },
+    setSessionFlowPaused: (sessionId: string, isPaused: boolean) => {
+      paused.push({ sessionId, paused: isPaused });
+    },
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "local-host",
+      label: "Local",
+      hostname: "local",
+      username: "",
+      protocol: "local",
+    },
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startLocal(createTermStub() as never);
+  onData?.("", { pluginPipelineIngressBytes: 12 });
+
+  assert.deepEqual(acknowledgements, [{ sessionId: "local-session", bytes: 12 }]);
+  assert.deepEqual(paused.at(-1), { sessionId: "local-session", paused: false });
+});
+
 test("local session runs startup command after attaching", async () => {
   const sessionWrites: Array<{ id: string; data: string; automated?: boolean }> = [];
   const attached: string[] = [];
@@ -1756,7 +2328,7 @@ test("startup command suppression is consumed only when scheduling", () => {
   assert.equal(resolveStartupCommand(ctx as never), "echo host-startup");
 });
 
-test("restored local reconnect does not fall back to host startup command", async () => {
+test("restored local reconnect runs the host startup command while automatic retry suppresses it", async () => {
   const sessionWrites: Array<{ id: string; data: string; automated?: boolean }> = [];
 
   const terminalBackend = {
@@ -1793,14 +2365,76 @@ test("restored local reconnect does not fall back to host startup command", asyn
     terminalSettings: { startupCommandDelayMs: 0 },
     terminalBackend,
     startupCommand: undefined,
-    suppressHostStartupCommandRef: { current: true },
+    suppressHostStartupCommandRef: {
+      current: shouldSuppressHostStartupCommandOnReconnect("restored"),
+    },
     promptLineBreakStateRef: undefined,
   });
 
   await createTerminalSessionStarters(ctx as never).startLocal(createTermStub() as never);
   await new Promise((resolve) => setTimeout(resolve, 0));
 
+  assert.deepEqual(sessionWrites, [
+    { id: "local-session", data: "echo host-startup\r", automated: true },
+  ]);
+
+  sessionWrites.length = 0;
+  const automaticReconnectCtx = createStarterContext({
+    ...ctx,
+    sessionRef: { current: null },
+    hasRunStartupCommandRef: { current: false },
+    suppressHostStartupCommandRef: {
+      current: shouldSuppressHostStartupCommandOnReconnect("automatic"),
+    },
+  });
+
+  await createTerminalSessionStarters(automaticReconnectCtx as never).startLocal(createTermStub() as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   assert.deepEqual(sessionWrites, []);
+});
+
+test("local session start uses per-session directory before global default", async () => {
+  let capturedOptions: Record<string, unknown> | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => "ssh-session",
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "local-session";
+    },
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+
+  const ctx = createStarterContext({
+    host: {
+      id: "local-host",
+      label: "Local",
+      hostname: "local",
+      username: "",
+      protocol: "local",
+      localStartDir: "/Users/alice/project",
+    },
+    terminalSettings: { localStartDir: "/Users/alice/default" },
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startLocal(createTermStub() as never);
+
+  assert.equal(capturedOptions?.cwd, "/Users/alice/project");
 });
 
 test("local session restores cwd before startup command after attaching", async () => {
@@ -2443,7 +3077,7 @@ test("startSSH allows jump hosts that use reference key files with unavailable s
   assert.equal(jumpHosts[0]?.passphrase, undefined);
 });
 
-test("startSSH forwards the SSH debug logging setting to the native bridge", async () => {
+test("startSSH forwards per-host SSH settings to the native bridge", async () => {
   let capturedOptions: Record<string, unknown> | null = null;
 
   const terminalBackend = {
@@ -2477,6 +3111,9 @@ test("startSSH forwards the SSH debug logging setting to the native bridge", asy
       username: "alice",
       port: 22,
       password: "pw",
+      requiresMfa: true,
+      sshTcpConnectTimeoutSeconds: 45,
+      sshAuthReadyTimeoutSeconds: 300,
     },
     keys: [],
     knownHosts: [],
@@ -2484,7 +3121,10 @@ test("startSSH forwards the SSH debug logging setting to the native bridge", asy
     sessionId: "session-1",
     terminalBackend,
     sshDebugLogEnabled: true,
-    terminalSettings: { keepaliveInterval: 30, keepaliveCountMax: 10 },
+    terminalSettings: {
+      keepaliveInterval: 30,
+      keepaliveCountMax: 10,
+    },
     sessionRef: { current: null },
     hasConnectedRef: { current: false },
     hasRunStartupCommandRef: { current: false },
@@ -2514,6 +3154,9 @@ test("startSSH forwards the SSH debug logging setting to the native bridge", asy
   await createTerminalSessionStarters(ctx as unknown as TerminalSessionStartersContext).startSSH(term);
 
   assert.equal(capturedOptions?.sshDebugLogEnabled, true);
+  assert.equal(capturedOptions?.requiresMfa, true);
+  assert.equal(capturedOptions?.sshTcpConnectTimeoutMs, 45_000);
+  assert.equal(capturedOptions?.sshAuthReadyTimeoutMs, 300_000);
 });
 
 test("startSSH omits identity file paths when password auth is selected", async () => {
@@ -2550,6 +3193,7 @@ test("startSSH omits identity file paths when password auth is selected", async 
       username: "alice",
       authMethod: "password",
       password: "secret",
+      useSshAgent: true,
       identityFilePaths: ["/Users/alice/.ssh/id_ed25519"],
     },
     keys: [],
@@ -2718,6 +3362,7 @@ test("startSSH omits jump host identity file paths when password auth is selecte
       username: "jumper",
       authMethod: "password",
       password: "secret",
+      useSshAgent: true,
       identityFilePaths: ["/Users/alice/.ssh/jump_ed25519"],
     }],
     sessionId: "session-1",

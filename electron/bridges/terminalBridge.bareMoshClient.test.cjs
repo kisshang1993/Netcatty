@@ -6,9 +6,7 @@ const path = require("node:path");
 const { StringDecoder } = require("node:string_decoder");
 
 const {
-  addBundledMoshDllPath,
   addBundledMoshRuntimeEnv,
-  addBundledMoshTerminfoEnv,
   resolveBareMoshClient,
 } = require("./terminalBridge.cjs");
 const { createMoshSessionApi } = require("./terminalBridge/moshSession.cjs");
@@ -95,132 +93,13 @@ test("mosh runtime does not fall back to system mosh or mosh-client", () => {
   assert.equal(source.includes("brew install mosh"), false);
 });
 
-test("Windows dev mosh-client prepends the bundled DLL directory", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "win32-x64", "mosh-client.exe");
-  const dllDir = path.join(tmp, "resources", "mosh", "win32-x64", "mosh-client-win32-x64-dlls");
-  writeExecutable(client);
-  fs.mkdirSync(dllDir, { recursive: true });
-  fs.writeFileSync(path.join(dllDir, "cygwin1.dll"), "dll");
-
-  const env = { Path: "C:\\Windows\\System32" };
-  addBundledMoshDllPath(env, client, { platform: "win32", arch: "x64" });
-
-  assert.equal(env.Path.split(";")[0], dllDir);
-});
-
-test("Windows dev mosh-client updates the PATH key used by child process env", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "win32-x64", "mosh-client.exe");
-  const dllDir = path.join(tmp, "resources", "mosh", "win32-x64", "mosh-client-win32-x64-dlls");
-  writeExecutable(client);
-  fs.mkdirSync(dllDir, { recursive: true });
-  fs.writeFileSync(path.join(dllDir, "cygwin1.dll"), "dll");
-
-  const env = {
-    Path: "C:\\Windows\\System32",
-    PATH: "C:\\Tools",
-  };
-  addBundledMoshDllPath(env, client, { platform: "win32", arch: "x64" });
-
-  assert.equal(env.PATH.split(";")[0], dllDir);
-  assert.equal(Object.prototype.hasOwnProperty.call(env, "Path"), false);
-});
-
-test("Linux mosh-client prefers a sibling bundled terminfo dir", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "linux-x64", "mosh-client");
-  const terminfo = path.join(tmp, "resources", "mosh", "linux-x64", "terminfo");
-  writeExecutable(client);
-  fs.mkdirSync(path.join(terminfo, "x"), { recursive: true });
-  fs.writeFileSync(path.join(terminfo, "x", "xterm-256color"), "terminfo");
-
-  const env = {};
-  addBundledMoshTerminfoEnv(env, client, { platform: "linux" });
-
-  assert.equal(env.TERMINFO, terminfo);
-  const dirs = env.TERMINFO_DIRS.split(":");
-  assert.equal(dirs[0], terminfo);
-  assert.ok(dirs.includes("/usr/share/terminfo"));
-});
-
-test("Linux mosh-client falls back to distro paths when no bundle present", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "linux-x64", "mosh-client");
-  writeExecutable(client);
-
-  const env = {};
-  addBundledMoshTerminfoEnv(env, client, { platform: "linux" });
-
+test("MoshCatty runtime env is a no-op (no DLL bag / terminfo)", () => {
+  const env = { Path: "C:\\Windows\\System32", TERM: "xterm-256color" };
+  const out = addBundledMoshRuntimeEnv(env, "C:\\app\\mosh-client.exe", { platform: "win32" });
+  assert.equal(out, env);
   assert.equal(env.TERMINFO, undefined);
-  const dirs = env.TERMINFO_DIRS.split(":");
-  assert.ok(dirs.includes("/etc/terminfo"));
-  assert.ok(dirs.includes("/lib/terminfo"));
-  assert.ok(dirs.includes("/usr/share/terminfo"));
-});
-
-test("Linux mosh-client merges caller-supplied TERMINFO_DIRS between bundle and system defaults", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "linux-x64", "mosh-client");
-  const terminfo = path.join(tmp, "resources", "mosh", "linux-x64", "terminfo");
-  writeExecutable(client);
-  fs.mkdirSync(path.join(terminfo, "x"), { recursive: true });
-  fs.writeFileSync(path.join(terminfo, "x", "xterm-256color"), "terminfo");
-
-  const env = { TERMINFO_DIRS: "/home/user/.terminfo" };
-  addBundledMoshTerminfoEnv(env, client, { platform: "linux" });
-
-  const dirs = env.TERMINFO_DIRS.split(":");
-  assert.equal(dirs[0], terminfo);
-  assert.equal(dirs[1], "/home/user/.terminfo");
-  assert.ok(dirs.includes("/usr/share/terminfo"));
-});
-
-test("Darwin mosh-client uses macOS-aware terminfo search paths", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "darwin-universal", "mosh-client");
-  writeExecutable(client);
-
-  const env = {};
-  addBundledMoshTerminfoEnv(env, client, { platform: "darwin" });
-
-  const dirs = env.TERMINFO_DIRS.split(":");
-  assert.ok(dirs.includes("/usr/share/terminfo"));
-  assert.ok(dirs.includes("/opt/homebrew/share/terminfo"));
-});
-
-test("Windows mosh-client points ncurses at bundled terminfo", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "win32-x64", "mosh-client.exe");
-  const terminfo = path.join(tmp, "resources", "mosh", "win32-x64", "terminfo");
-  writeExecutable(client);
-  fs.mkdirSync(path.join(terminfo, "x"), { recursive: true });
-  fs.writeFileSync(path.join(terminfo, "x", "xterm-256color"), "terminfo");
-
-  const env = {};
-  addBundledMoshTerminfoEnv(env, client, { platform: "win32" });
-
-  assert.equal(env.TERMINFO, terminfo);
-  assert.equal(env.TERMINFO_DIRS, terminfo);
-});
-
-test("Windows mosh runtime env includes DLL path and terminfo", () => {
-  const tmp = makeTmp();
-  const client = path.join(tmp, "resources", "mosh", "win32-x64", "mosh-client.exe");
-  const dllDir = path.join(tmp, "resources", "mosh", "win32-x64", "mosh-client-win32-x64-dlls");
-  const terminfo = path.join(tmp, "resources", "mosh", "win32-x64", "terminfo");
-  writeExecutable(client);
-  fs.mkdirSync(dllDir, { recursive: true });
-  fs.writeFileSync(path.join(dllDir, "cygwin1.dll"), "dll");
-  fs.mkdirSync(path.join(terminfo, "78"), { recursive: true });
-  fs.writeFileSync(path.join(terminfo, "78", "xterm-256color"), "terminfo");
-
-  const env = { Path: "C:\\Windows\\System32" };
-  addBundledMoshRuntimeEnv(env, client, { platform: "win32", arch: "x64" });
-
-  assert.equal(env.Path.split(";")[0], dllDir);
-  assert.equal(env.TERMINFO, terminfo);
-  assert.equal(env.TERMINFO_DIRS, terminfo);
+  assert.equal(env.TERMINFO_DIRS, undefined);
+  assert.equal(env.Path, "C:\\Windows\\System32");
 });
 
 test("mosh UTF-8 decoder preserves fragmented Chinese output", () => {
@@ -243,6 +122,141 @@ test("mosh UTF-8 decoder preserves fragmented Chinese output", () => {
   assert.equal(decoded.includes("\uFFFD"), false);
 });
 
+test("Mosh prepares the configured system agent before building native ssh options", async (t) => {
+  const calls = [];
+  const tempBase = makeTmp();
+  t.after(() => fs.rmSync(tempBase, { recursive: true, force: true }));
+  const api = createMoshSessionApi({
+    os,
+    path,
+    fs,
+    process,
+    randomUUID: () => "fixed",
+    tempDirBridge: { getTempFilePath: (fileName) => path.join(tempBase, fileName) },
+    prepareSystemSshAgentForAuth: async (options) => {
+      calls.push(["prepare", options.identityAgent, options.useKeychain]);
+    },
+    getAvailableAgentSocket: async (identityAgent) => {
+      calls.push(["resolve", identityAgent]);
+      return "/tmp/custom-agent.sock";
+    },
+  });
+
+  const prepared = await api.prepareMoshSshAgentOptions({
+    hostname: "host.example",
+    username: "alice",
+    useSshAgent: true,
+    identityAgent: "/tmp/custom-agent.sock",
+    useKeychain: true,
+    addKeysToAgent: "yes",
+    identityFilePaths: ["~/.ssh/id_work"],
+  });
+  const auth = await api.buildMoshSshAuthArgs({
+    ...prepared,
+    identitiesOnly: true,
+    identityFilePaths: ["~/.ssh/id_work"],
+  }, "session-1");
+  const env = api.applyMoshSshAgentEnvironment({}, prepared);
+
+  assert.deepEqual(calls, [
+    ["prepare", "/tmp/custom-agent.sock", true],
+    ["resolve", "/tmp/custom-agent.sock"],
+  ]);
+  assert.deepEqual(auth.sshArgs, [
+    "-i", path.join(os.homedir(), ".ssh", "id_work.pub"),
+    "-o", "IdentitiesOnly=yes",
+    "-o", "IdentityAgent=/tmp/custom-agent.sock",
+  ]);
+  assert.equal(env.SSH_AUTH_SOCK, "/tmp/custom-agent.sock");
+
+  const selected = await api.buildMoshSshAuthArgs({
+    ...prepared,
+    identitiesOnly: true,
+    keyId: "vault-key",
+    agentPublicKeys: ["ssh-ed25519 AAAASELECTED"],
+  }, "session-selected");
+  const selectedPath = selected.sshArgs[1];
+  assert.deepEqual(selected.sshArgs.slice(0, 2), ["-i", selectedPath]);
+  assert.equal(fs.readFileSync(selectedPath, "utf8"), "ssh-ed25519 AAAASELECTED\n");
+  assert.ok(selected.sshArgs.includes("IdentitiesOnly=yes"));
+  api.cleanupMoshAuthTempFiles(selected.tempFiles);
+});
+
+test("Mosh explicitly disables native agent login after an opt-out", async () => {
+  const api = createMoshSessionApi({
+    os,
+    path,
+    fs,
+    process,
+    randomUUID: () => "fixed",
+  });
+  const auth = await api.buildMoshSshAuthArgs({ useSshAgent: false }, "session-disabled");
+  const env = api.applyMoshSshAgentEnvironment(
+    { SSH_AUTH_SOCK: "/tmp/inherited-agent.sock" },
+    { useSshAgent: false },
+  );
+
+  assert.deepEqual(auth.sshArgs, ["-o", "IdentityAgent=none"]);
+  assert.equal(env.SSH_AUTH_SOCK, undefined);
+
+  const forwardingAuth = await api.buildMoshSshAuthArgs({
+    useSshAgent: false,
+    agentForwarding: true,
+  }, "session-forwarding");
+  const forwardingEnv = api.applyMoshSshAgentEnvironment(
+    { SSH_AUTH_SOCK: "/tmp/forwarded-agent.sock" },
+    { useSshAgent: false, agentForwarding: true },
+  );
+  assert.deepEqual(forwardingAuth.sshArgs, [
+    "-o", "IdentityAgent=none",
+    "-o", "ForwardAgent=${SSH_AUTH_SOCK}",
+  ]);
+  assert.equal(forwardingEnv.SSH_AUTH_SOCK, "/tmp/forwarded-agent.sock");
+});
+
+test("Mosh automatic mode discovers custom local keys in preferred order", async (t) => {
+  const tempBase = makeTmp();
+  const fakeHome = path.join(tempBase, "home");
+  const sshDir = path.join(fakeHome, ".ssh");
+  fs.mkdirSync(sshDir, { recursive: true });
+  fs.writeFileSync(path.join(sshDir, "id_work"), "PRIVATE KEY");
+  fs.writeFileSync(path.join(sshDir, "id_ed25519"), "PRIVATE KEY");
+  fs.writeFileSync(path.join(sshDir, "id_rsa.pub"), "PUBLIC KEY");
+  t.after(() => fs.rmSync(tempBase, { recursive: true, force: true }));
+
+  const api = createMoshSessionApi({
+    os: { ...os, homedir: () => fakeHome },
+    path,
+    fs,
+    process,
+    randomUUID: () => "fixed",
+  });
+  const auth = await api.buildMoshSshAuthArgs({ authMethod: "auto" }, "session-auto");
+
+  assert.deepEqual(auth.sshArgs, [
+    "-i", path.join(sshDir, "id_ed25519"),
+    "-i", path.join(sshDir, "id_work"),
+  ]);
+  assert.deepEqual(auth.identityFilePaths, [
+    path.join(sshDir, "id_ed25519"),
+    path.join(sshDir, "id_work"),
+  ]);
+
+  const agentFallback = await api.buildMoshSshAuthArgs({
+    authMethod: "auto",
+    useSshAgent: true,
+    identitiesOnly: false,
+  }, "session-auto-agent");
+  assert.deepEqual(agentFallback.sshArgs, [
+    "-i", path.join(sshDir, "id_ed25519"),
+    "-i", path.join(sshDir, "id_work"),
+  ]);
+  assert.deepEqual(agentFallback.identityFilePaths, [
+    path.join(sshDir, "id_ed25519"),
+    path.join(sshDir, "id_work"),
+  ]);
+});
+
 test("removed Mosh client detection APIs are not exposed to the renderer", () => {
   const bridgeSource = fs.readFileSync(path.join(__dirname, "terminalBridge.cjs"), "utf8");
   const preloadSource = fs.readFileSync(path.join(__dirname, "..", "preload.cjs"), "utf8");
@@ -254,4 +268,12 @@ test("removed Mosh client detection APIs are not exposed to the renderer", () =>
     assert.equal(source.includes("netcatty:mosh:detectClient"), false);
     assert.equal(source.includes("netcatty:mosh:pickClient"), false);
   }
+});
+
+test("Cygwin / terminfo helpers are gone from the mosh session module", () => {
+  const source = fs.readFileSync(path.join(__dirname, "terminalBridge", "moshSession.cjs"), "utf8");
+  assert.equal(source.includes("toCygwinPath"), false);
+  assert.equal(source.includes("findBundledMoshDllDir"), false);
+  assert.equal(source.includes("findBundledMoshTerminfoDir"), false);
+  assert.equal(source.includes("cygwin1"), false);
 });

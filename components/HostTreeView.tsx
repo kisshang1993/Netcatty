@@ -9,6 +9,10 @@ import { useVaultHostTreeActions } from '../application/state/vaultHostTreeActio
 import { useTreeExpandedState } from '../application/state/useTreeExpandedState';
 import { applyGroupDefaults, resolveGroupDefaults } from '../domain/groupConfig';
 import { resolveTelnetPort, resolveTelnetUsername, sanitizeHost } from '../domain/host';
+import {
+  resolveHostActivateAction,
+  type HostClickBehavior,
+} from '../domain/hostClickBehavior';
 import { sortByVaultOrder } from '../domain/vaultOrder';
 import { STORAGE_KEY_VAULT_HOSTS_TREE_EXPANDED } from '../infrastructure/config/storageKeys';
 import { GroupConfig, GroupNode, Host } from '../types';
@@ -61,6 +65,11 @@ interface HostTreeViewProps {
   isMultiSelectMode?: boolean;
   selectedHostIds?: Set<string>;
   toggleHostSelection?: (hostId: string) => void;
+  hostClickBehavior?: HostClickBehavior;
+  focusedHostId?: string | null;
+  onFocusHost?: (hostId: string | null) => void;
+  focusedGroupPath?: string | null;
+  onFocusGroup?: (groupPath: string | null) => void;
   getDropTargetClasses?: (target: string) => string;
   setDragOverDropTarget?: (target: string | null) => void;
   groupConfigs?: GroupConfig[];
@@ -91,6 +100,11 @@ interface TreeNodeProps {
   isMultiSelectMode?: boolean;
   selectedHostIds?: Set<string>;
   toggleHostSelection?: (hostId: string) => void;
+  hostClickBehavior?: HostClickBehavior;
+  focusedHostId?: string | null;
+  onFocusHost?: (hostId: string | null) => void;
+  focusedGroupPath?: string | null;
+  onFocusGroup?: (groupPath: string | null) => void;
   getDropTargetClasses?: (target: string) => string;
   setDragOverDropTarget?: (target: string | null) => void;
   groupConfigs: GroupConfig[];
@@ -123,6 +137,11 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   isMultiSelectMode,
   selectedHostIds,
   toggleHostSelection,
+  hostClickBehavior = 'connect',
+  focusedHostId,
+  onFocusHost,
+  focusedGroupPath,
+  onFocusGroup,
   getDropTargetClasses,
   setDragOverDropTarget,
   groupConfigs,
@@ -135,6 +154,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   const isInlineEditing = inlineEdit?.groupPath === node.path;
   const groupRowRef = useRef<HTMLDivElement>(null);
   const isExpanded = expandedPaths.has(node.path);
+  const isGroupFocused = hostClickBehavior === 'select' && focusedGroupPath === node.path;
 
   useEffect(() => {
     if (!isInlineEditing || !inlineEdit?.shouldScrollIntoView) return;
@@ -210,6 +230,11 @@ const TreeNode: React.FC<TreeNodeProps> = ({
         open={isExpanded}
         onOpenChange={() => {
           if (isInlineEditing) return;
+          if (hostClickBehavior === 'select' && focusedGroupPath !== node.path) {
+            onFocusGroup?.(node.path);
+            onFocusHost?.(null);
+            return;
+          }
           onToggle(node.path);
         }}
       >
@@ -221,6 +246,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
                 name={node.name}
                 depth={depth}
                 expanded={isExpanded}
+                selected={isGroupFocused}
                 hasChildren={hasChildren || node.hosts.length > 0}
                 count={hostsCountInNode}
                 editing={isInlineEditing}
@@ -272,15 +298,17 @@ const TreeNode: React.FC<TreeNodeProps> = ({
                     Managed
                   </span>
                 )}
-                actions={(
+                labelActions={(
                   <button
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md opacity-0 transition-colors hover:bg-secondary/80 group-hover:opacity-100"
+                    aria-label={`Edit ${node.name}`}
+                    data-host-tree-group-edit-button={node.path}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 transition-colors hover:bg-secondary/80 group-hover:opacity-100"
                     onClick={(e) => {
                       e.stopPropagation();
                       onEditGroup(node.path);
                     }}
                   >
-                    <Edit2 size={13} />
+                    <Edit2 size={12} />
                   </button>
                 )}
               />
@@ -325,6 +353,11 @@ const TreeNode: React.FC<TreeNodeProps> = ({
 	              isMultiSelectMode={isMultiSelectMode}
 	              selectedHostIds={selectedHostIds}
 	              toggleHostSelection={toggleHostSelection}
+	              hostClickBehavior={hostClickBehavior}
+	              focusedHostId={focusedHostId}
+	              onFocusHost={onFocusHost}
+	              focusedGroupPath={focusedGroupPath}
+	              onFocusGroup={onFocusGroup}
 	              getDropTargetClasses={getDropTargetClasses}
 	              setDragOverDropTarget={setDragOverDropTarget}
 	              groupConfigs={groupConfigs}
@@ -348,6 +381,12 @@ const TreeNode: React.FC<TreeNodeProps> = ({
 	              isMultiSelectMode={isMultiSelectMode}
 	              selectedHostIds={selectedHostIds}
 	              toggleHostSelection={toggleHostSelection}
+	              hostClickBehavior={hostClickBehavior}
+	              focusedHostId={focusedHostId}
+	              onFocusHost={(hostId) => {
+	                onFocusHost?.(hostId);
+	                if (hostId) onFocusGroup?.(null);
+	              }}
 	              groupConfigs={groupConfigs}
 	              groupDefaultsByPath={groupDefaultsByPath}
 	            />
@@ -371,6 +410,9 @@ interface HostTreeItemProps {
   isMultiSelectMode?: boolean;
   selectedHostIds?: Set<string>;
   toggleHostSelection?: (hostId: string) => void;
+  hostClickBehavior?: HostClickBehavior;
+  focusedHostId?: string | null;
+  onFocusHost?: (hostId: string | null) => void;
   groupConfigs: GroupConfig[];
   groupDefaultsByPath: ReadonlyMap<string, Partial<GroupConfig>>;
 }
@@ -408,6 +450,9 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
   isMultiSelectMode,
   selectedHostIds,
   toggleHostSelection,
+  hostClickBehavior = 'connect',
+  focusedHostId,
+  onFocusHost,
   groupConfigs,
   groupDefaultsByPath,
 }) => {
@@ -420,7 +465,9 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
   const displayProtocol = displayDetails.protocol;
   const displayUsername = displayDetails.username;
   const displayPort = displayDetails.port;
-  const isSelected = isMultiSelectMode && selectedHostIds?.has(host.id);
+  const isMultiSelected = Boolean(isMultiSelectMode && selectedHostIds?.has(host.id));
+  const isFocusSelected = !isMultiSelectMode && hostClickBehavior === 'select' && focusedHostId === host.id;
+  const isSelected = isMultiSelected || isFocusSelected;
 
   return (
     <ContextMenu>
@@ -436,18 +483,28 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
           draggable={!isMultiSelectMode}
           onDragStart={(e) => e.dataTransfer.setData("host-id", host.id)}
           onClick={() => {
-            if (isMultiSelectMode && toggleHostSelection) {
-              toggleHostSelection(host.id);
-            } else {
-              onConnect(safeHost);
+            const action = resolveHostActivateAction({
+              behavior: hostClickBehavior,
+              isMultiSelectMode: Boolean(isMultiSelectMode),
+              focusedHostId,
+              hostId: host.id,
+            });
+            if (action === 'toggle-multi') {
+              toggleHostSelection?.(host.id);
+              return;
             }
+            if (action === 'select') {
+              onFocusHost?.(host.id);
+              return;
+            }
+            onConnect(safeHost);
           }}
           leading={isMultiSelectMode ? (
             <div className="mr-2 flex h-5 w-4 flex-shrink-0 items-center justify-center" onClick={(e) => {
               e.stopPropagation();
               toggleHostSelection?.(host.id);
             }}>
-              {isSelected ? (
+              {isMultiSelected ? (
                 <CheckSquare size={15} className="text-primary" />
               ) : (
                 <Square size={15} className="text-muted-foreground" />
@@ -463,6 +520,17 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
             <div className="min-w-0 flex-1 leading-tight">
               <div className="flex items-center gap-1.5 truncate font-medium leading-4">
                 <span className="truncate">{host.label}</span>
+                <button
+                  aria-label={`Edit ${host.label}`}
+                  data-host-tree-host-edit-button={host.id}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors opacity-0 hover:bg-secondary/80 group-hover:opacity-100"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onEditHost(host);
+                  }}
+                >
+                  <Edit2 size={12} />
+                </button>
                 <HostNotesIndicator notes={host.notes} />
               </div>
               <div className="truncate text-[11px] leading-4 text-muted-foreground">
@@ -470,7 +538,7 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
               </div>
             </div>
           )}
-          actions={(
+          actions={(displayProtocol && displayProtocol !== 'ssh') || tags.length > 0 ? (
             <div className="ml-2 flex shrink-0 items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
               {displayProtocol && displayProtocol !== 'ssh' && (
                 <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] leading-none text-primary">
@@ -483,17 +551,8 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
                   {tags.length > 2 && '...'}
                 </span>
               )}
-              <button
-                className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-secondary/80"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEditHost(host);
-                }}
-              >
-                <Edit2 size={12} />
-              </button>
             </div>
-          )}
+          ) : undefined}
         />
       </ContextMenuTrigger>
       <HostTreeHostContextMenuContent
@@ -534,6 +593,11 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
   isMultiSelectMode,
   selectedHostIds,
   toggleHostSelection,
+  hostClickBehavior,
+  focusedHostId,
+  onFocusHost,
+  focusedGroupPath,
+  onFocusGroup,
   getDropTargetClasses,
   setDragOverDropTarget,
   groupConfigs = [],
@@ -697,6 +761,11 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
           isMultiSelectMode={isMultiSelectMode}
           selectedHostIds={selectedHostIds}
           toggleHostSelection={toggleHostSelection}
+          hostClickBehavior={hostClickBehavior}
+          focusedHostId={focusedHostId}
+          onFocusHost={onFocusHost}
+          focusedGroupPath={focusedGroupPath}
+          onFocusGroup={onFocusGroup}
 	          getDropTargetClasses={getDropTargetClasses}
 	          setDragOverDropTarget={setDragOverDropTarget}
 	          groupConfigs={groupConfigs}
@@ -719,6 +788,12 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
           isMultiSelectMode={isMultiSelectMode}
 	          selectedHostIds={selectedHostIds}
 	          toggleHostSelection={toggleHostSelection}
+          hostClickBehavior={hostClickBehavior}
+          focusedHostId={focusedHostId}
+          onFocusHost={(hostId) => {
+            onFocusHost?.(hostId);
+            if (hostId) onFocusGroup?.(null);
+          }}
 	          groupConfigs={groupConfigs}
 	          groupDefaultsByPath={groupDefaultsByPath}
 	        />

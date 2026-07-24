@@ -24,12 +24,20 @@ const {
   stripAnsi,
 } = require("./ptyExecHelpers.cjs");
 
+function stripJobMarkerLines(text, marker) {
+  return text.replace(
+    new RegExp(`^([^\r\n]*?)${marker}[^\r\n]*[\r\n]*`, "gm"),
+    "$1",
+  );
+}
+
 function startPtyJob(ptyStream, command, options) {
   const {
     stripMarkers = false,
     trackForCancellation = null,
     timeoutMs = 60000,
     shellKind,
+    loginShellHint,
     chatSessionId,
     abortSignal,
     expectedPrompt,
@@ -41,7 +49,9 @@ function startPtyJob(ptyStream, command, options) {
   } = options || {};
 
   const marker = `__NCMCP_${Date.now().toString(36)}_${crypto.randomBytes(16).toString('hex')}__`;
-  const resolvedShellKind = resolveEffectiveShellKind(shellKind, expectedPrompt);
+  const resolvedShellKind = resolveEffectiveShellKind(shellKind, expectedPrompt, {
+    loginShellHint,
+  });
   const CANCEL_RETRY_MS = 5000;
   const CANCEL_WALL_TIMEOUT_MS = 30000;
 
@@ -214,7 +224,7 @@ function startPtyJob(ptyStream, command, options) {
   }
 
   function checkEnd() {
-    const found = findEndMarker(output, marker);
+    const found = findEndMarker(output, marker, { allowInline: true });
     if (!found) return;
     const stdout = output.slice(0, found.endIdx);
     finish(stdout, found.exitCode);
@@ -265,7 +275,7 @@ function startPtyJob(ptyStream, command, options) {
       // Strip only this job's specific marker lines so user output that
       // happens to contain "__NCMCP_" (e.g. printf '__NCMCP_demo\n') is
       // preserved.
-      cleanVisible = cleanVisible.replace(new RegExp(`^[^\r\n]*${marker}[^\r\n]*[\r\n]*`, "gm"), "");
+      cleanVisible = stripJobMarkerLines(cleanVisible, marker);
       if (!cleanVisible) return;
     }
     visibleHighWatermark += cleanVisible.length;
@@ -308,7 +318,7 @@ function startPtyJob(ptyStream, command, options) {
 
     // Flush any incomplete marker carry — if it wasn't this job's marker, append it.
     if (visibleMarkerCarry) {
-      const leftover = visibleMarkerCarry.replace(new RegExp(`^[^\r\n]*${marker}[^\r\n]*[\r\n]*`, "gm"), "");
+      const leftover = stripJobMarkerLines(visibleMarkerCarry, marker);
       visibleMarkerCarry = "";
       if (leftover) {
         const next = appendBoundedOutput(visibleOutput, leftover, maxBufferedChars);

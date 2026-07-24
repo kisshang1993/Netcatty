@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 
 import { useActiveTabId } from '../../application/state/activeTabStore';
 import { sessionCapabilitiesStore } from '../../application/state/sessionCapabilitiesStore';
@@ -10,6 +10,8 @@ import type { TerminalContextReader } from '../../domain/terminalContextRead';
 import { useSystemCapabilitiesWarmup } from '../systemManager/hooks/useSystemManager';
 import { cn } from '../../lib/utils';
 import type { Host, TerminalSession, Workspace } from '../../types';
+import { resolveTerminalHibernateEnabled } from '../../domain/terminalHibernate';
+import { shouldMeasureTerminalLayerLayout } from '../terminalPaneVisibility';
 import { TerminalLayerView } from './TerminalLayerView';
 import { useTerminalAiContexts } from './useTerminalAiContexts';
 import { useTerminalLayerEffects } from './useTerminalLayerEffects';
@@ -46,6 +48,17 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
   );
   const isFocusMode = activeWorkspace?.viewMode === 'focus';
   const focusedSessionId = activeWorkspace?.focusedSessionId;
+  const hibernateHiddenTabs = resolveTerminalHibernateEnabled(s.terminalSettings);
+  const localWorkspaceIds = useMemo(() => new Set(
+    sessions
+      .filter((session) => session.workspaceId && sessionHostsMap.get(session.id)?.protocol === 'local')
+      .map((session) => session.workspaceId as string),
+  ), [sessionHostsMap, sessions]);
+  const shouldKeepHiddenWorkspaceLaidOut = useCallback(
+    (workspace: Workspace) => !hibernateHiddenTabs || localWorkspaceIds.has(workspace.id),
+    [hibernateHiddenTabs, localWorkspaceIds],
+  );
+  const keepHiddenLayoutActive = !hibernateHiddenTabs || localWorkspaceIds.size > 0;
   const effectiveFocusedSessionId = useMemo((): string | null => {
     if (activeWorkspace) {
       if (focusedSessionId) return focusedSessionId;
@@ -71,6 +84,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     setDropHint,
     setResizing,
     setWorkspaceArea,
+    workspaceArea,
     workspaceInnerRef,
     workspaceOuterRef,
     workspaceOverlayRef,
@@ -79,6 +93,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     activeSession,
     activeWorkspace,
     isFocusMode,
+    shouldKeepHiddenWorkspaceLaidOut,
     onAddSessionToWorkspace: s.onAddSessionToWorkspace,
     onCreateWorkspaceFromSessions: s.onCreateWorkspaceFromSessions,
     onSetDraggingSessionId: s.onSetDraggingSessionId,
@@ -297,7 +312,9 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     clearTimeout,
     document,
     dropHint,
+    effectiveHosts: s.effectiveHosts,
     filterTabsMap: s.filterTabsMap,
+    onConnectToHost: s.onConnectToHost,
     focusedSessionId,
     getSessionActivityIdsToClear: s.getSessionActivityIdsToClear,
     handleToggleAiFromTopBar: s.handleToggleAiFromTopBar,
@@ -307,6 +324,11 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     isComposeBarOpen: s.isComposeBarOpen,
     isFocusMode,
     isTerminalLayerVisible,
+    shouldMeasureTerminalLayerLayout: shouldMeasureTerminalLayerLayout({
+      isTerminalLayerVisible,
+      keepHiddenLayoutActive,
+      workspaceArea,
+    }),
     lastSidePanelTabRef: s.lastSidePanelTabRef,
     Map,
     Math,
@@ -333,7 +355,6 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     setThemeMountedTabIds: s.setThemeMountedTabIds,
     setSidePanelOpenTabs: s.setSidePanelOpenTabs,
     setTimeout,
-    setupMcpApprovalBridge: s.setupMcpApprovalBridge,
     setWorkspaceArea,
     sidePanelPosition: s.sidePanelPosition,
     sidePanelWidth: s.sidePanelWidth,
@@ -422,11 +443,13 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     History: s.History,
     historySessionId,
     HistorySidePanel: s.HistorySidePanel,
+    hibernateHiddenTabs,
     handleOsDetected: s.handleOsDetected,
     handlePendingTerminalSelectionConsumed: s.handlePendingTerminalSelectionConsumed,
     handlePendingUploadHandled: s.handlePendingUploadHandled,
     handleSessionExit: s.handleSessionExit,
     handleSftpCurrentPathChange: s.handleSftpCurrentPathChange,
+    handleSftpActiveTransfersChange: s.handleSftpActiveTransfersChange,
     handleSftpInitialLocationApplied: s.handleSftpInitialLocationApplied,
     persistSidePanelWidth: s.persistSidePanelWidth,
     setSidePanelWidth: s.setSidePanelWidth,
@@ -521,6 +544,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     resolvedSessionHostIds: s.resolvedSessionHostIds,
     sessionLogConfig: s.sessionLogConfig,
     sessionSudoAutofillPasswordsMap: s.sessionSudoAutofillPasswordsMap,
+    sessionSudoAutofillCandidatesMap: s.sessionSudoAutofillCandidatesMap,
     sessions,
     setDropHint,
     setEditorWordWrap: s.setEditorWordWrap,
@@ -598,6 +622,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     s.noteGroups,
     handleWorkspaceDrop,
     handleTerminalContextReaderChange,
+    hibernateHiddenTabs,
     historySessionId,
     isFocusMode,
     isSidePanelOpenForCurrentTab,

@@ -3,6 +3,8 @@ import { Host, ManagedSource } from "../../domain/models";
 import {
   serializeHostsToSshConfig,
   mergeWithExistingSshConfig,
+  toSafeSshHostAlias,
+  isSafeSshHostMatchLiteral,
 } from "../../domain/sshConfigSerializer";
 import { netcattyBridge } from "../../infrastructure/services/netcattyBridge";
 
@@ -14,6 +16,18 @@ export interface UseManagedSourceSyncOptions {
   managedSources: ManagedSource[];
   onUpdateManagedSources: (sources: ManagedSource[]) => void;
 }
+
+export const haveSameManagedSshAgentFields = (previous: Host, current: Host): boolean => (
+  previous.useSshAgent === current.useSshAgent
+  && previous.identityAgent === current.identityAgent
+  && previous.identitiesOnly === current.identitiesOnly
+  && previous.addKeysToAgent === current.addKeysToAgent
+  && previous.useKeychain === current.useKeychain
+  && (previous.identityFilePaths?.length ?? 0) === (current.identityFilePaths?.length ?? 0)
+  && (previous.identityFilePaths ?? []).every(
+    (path, index) => path === current.identityFilePaths?.[index],
+  )
+);
 
 export const useManagedSourceSync = ({
   hosts,
@@ -75,9 +89,11 @@ export const useManagedSourceSync = ({
         for (const host of managedHosts) {
           if (!host.protocol || host.protocol === "ssh") {
             // Add both hostname and sanitized label (alias) for matching
-            managedHostnameSet.add(host.hostname.toLowerCase());
+            if (isSafeSshHostMatchLiteral(host.hostname)) {
+              managedHostnameSet.add(host.hostname.toLowerCase());
+            }
             if (host.label) {
-              managedHostnameSet.add(host.label.replace(/\s/g, "").toLowerCase());
+              managedHostnameSet.add(toSafeSshHostAlias(host.label, host.hostname).toLowerCase());
             }
           }
         }
@@ -285,6 +301,7 @@ export const useManagedSourceSync = ({
             prev.label !== curr.label ||
             prev.group !== curr.group ||
             prev.protocol !== curr.protocol ||
+            !haveSameManagedSshAgentFields(prev, curr) ||
             chainChanged;
           if (hasChanged) {
             sourceChanged = true;

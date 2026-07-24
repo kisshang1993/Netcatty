@@ -2,6 +2,7 @@ import { Host, Snippet, TerminalSettings } from './models';
 import { sanitizeHostIconFields } from './hostIcon';
 import { migrateHostConnectScriptIds } from './hostConnectScripts.ts';
 import { migrateDeprecatedFontOverride } from '../infrastructure/config/fonts';
+import { sanitizeOptionalSshTimeoutSeconds } from './sshConnectionTimeouts.ts';
 
 export type HostLabelRenameResult =
   | { ok: true; changed: true; hosts: Host[] }
@@ -54,6 +55,13 @@ export const LINUX_DISTRO_OPTIONS = [
 
 export const POSIX_PLATFORM_OPTIONS = [
   'macos',
+  'freebsd',
+] as const;
+
+// Only platforms backed by the current stats and system-management commands
+// belong here. Other POSIX platforms may still be valid icon choices.
+const LINUX_LIKE_RUNTIME_PLATFORM_OPTIONS = [
+  'macos',
 ] as const;
 
 /**
@@ -92,6 +100,7 @@ export const normalizeDistroId = (value?: string) => {
   ) {
     return 'macos';
   }
+  if (v.includes('freebsd')) return 'freebsd';
   if (v.includes('ubuntu')) return 'ubuntu';
   if (v.includes('debian')) return 'debian';
   if (v.includes('centos')) return 'centos';
@@ -197,7 +206,7 @@ export const classifyDistroId = (distroId?: string): DeviceClass => {
   if (!v) return 'other';
   if ((NETWORK_DEVICE_OPTIONS as readonly string[]).includes(v)) return 'network-device';
   if ((LINUX_DISTRO_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
-  if ((POSIX_PLATFORM_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
+  if ((LINUX_LIKE_RUNTIME_PLATFORM_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
   return 'other';
 };
 
@@ -361,6 +370,27 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
         : undefined;
   const cleanHostIcon = sanitizeHostIconFields(host);
   const migrated = migrateDeprecatedFontOverride(host);
+  // Before explicit per-host authentication modes existed, new hosts were
+  // persisted with authMethod="password" even though an empty password still
+  // allowed the ambient agent and local keys. Preserve that behavior once on
+  // load; versioned records represent a deliberate Password-only selection.
+  const isLegacyPasswordDefault = migrated.authPolicyVersion !== 1
+    && migrated.authMethod === 'password'
+    && (
+      migrated.useSshAgent === true
+      || Boolean(migrated.identityFileId)
+      || Boolean(migrated.identityFilePaths?.length)
+      || (migrated.savePassword !== false && !migrated.password?.length)
+    );
+  const inferredLegacyAuthMethod = migrated.authPolicyVersion !== 1
+    && migrated.authMethod === undefined
+    && migrated.useSshAgent !== true
+    ? migrated.identityFilePaths?.length
+      ? 'key'
+      : !migrated.identityFileId && migrated.password?.length
+        ? 'password'
+        : undefined
+    : undefined;
   const cleanNotes = host.notes?.trim() || undefined;
   const connectScriptIds = host.connectScriptIds ?? (
     snippets.length > 0
@@ -371,6 +401,10 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
   );
   return {
     ...migrated,
+    authMethod: isLegacyPasswordDefault
+      ? undefined
+      : migrated.authMethod ?? inferredLegacyAuthMethod,
+    authPolicyVersion: 1,
     hostname: cleanHostname,
     distro: cleanDistro,
     distroMode: cleanDistroMode,
@@ -382,6 +416,12 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
     iconColorCustom: undefined,
     ...cleanHostIcon,
     notes: cleanNotes,
+    sshTcpConnectTimeoutSeconds: sanitizeOptionalSshTimeoutSeconds(
+      host.sshTcpConnectTimeoutSeconds,
+    ),
+    sshAuthReadyTimeoutSeconds: sanitizeOptionalSshTimeoutSeconds(
+      host.sshAuthReadyTimeoutSeconds,
+    ),
     connectScriptIds: connectScriptIds && connectScriptIds.length > 0 ? connectScriptIds : undefined,
   };
 };

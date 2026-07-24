@@ -4,6 +4,7 @@ import { activeTabStore, useActiveTabId, useIsTabActive } from '../../applicatio
 import type { EditorTab } from '../../application/state/editorTabStore';
 import type { LogView } from '../../application/state/logViewState';
 import { useWindowControls } from '../../application/state/useWindowControls';
+import { terminalReconnectRegistry } from '../../application/state/terminalReconnectRegistry';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { getEffectiveHostDistro } from '../../domain/host';
 import { resolveHostIconAppearance, resolveHostIconColorAppearance } from '../../domain/hostIcon';
@@ -21,6 +22,8 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { SessionTabContextMenuContent } from './SessionTabContextMenuContent';
 import { renderHostIconGlyph } from '../hostIconRenderer';
+import type { PluginViewTab } from '../../application/state/pluginViewTabStore';
+import { PluginContributionIcon } from '../plugins/PluginContributionIcon';
 
 // File extensions that render the code-file icon instead of the plain text icon.
 const CODE_EXTENSIONS_RE = /\.(js|jsx|ts|tsx|py|rb|go|rs|c|cpp|cs|java|php|sh|bash|zsh|fish|lua|r|scala|swift|kt|html|css|scss|less|json|yaml|yml|toml|xml|sql|graphql|gql|md|mdx|conf|ini|env|tf|hcl|dockerfile)$/i;
@@ -322,7 +325,8 @@ export const ActiveTabAutoScroller: React.FC<ActiveTabAutoScrollerProps> = memo(
     const activeTabElement = container.querySelector(`[data-tab-id="${activeTabId}"]`) as HTMLElement | null;
     scrollTopTabIntoComfortView(container, activeTabElement, 'smooth');
 
-    setTimeout(updateScrollState, 260);
+    const scrollStateTimer = setTimeout(updateScrollState, 260);
+    return () => clearTimeout(scrollStateTimer);
   }, [activeTabId, tabsContainerRef, updateScrollState]);
 
   return null;
@@ -396,6 +400,98 @@ export const RootTopTab: React.FC<RootTopTabProps> = memo(({ tabId, label, icon,
   );
 });
 RootTopTab.displayName = 'RootTopTab';
+
+interface PluginViewTopTabProps {
+  tab: PluginViewTab;
+  onClose(tabId: string): void;
+  renderBulkCloseItems: RenderBulkCloseItems;
+  t: TranslateFn;
+  isBeingDragged: boolean;
+  isDraggingForReorder: boolean;
+  shiftStyle: React.CSSProperties;
+  showDropIndicatorBefore: boolean;
+  showDropIndicatorAfter: boolean;
+  onTabDragStart(e: React.DragEvent, tabId: string): void;
+  onTabDragEnd(): void;
+  onTabDragOver(e: React.DragEvent, tabId: string): void;
+  onTabDragLeave(e: React.DragEvent): void;
+  onTabDrop(e: React.DragEvent, tabId: string): void;
+  tabAnimationClass?: string;
+}
+
+export const PluginViewTopTab: React.FC<PluginViewTopTabProps> = memo(({
+  tab,
+  onClose,
+  renderBulkCloseItems,
+  t,
+  isBeingDragged,
+  isDraggingForReorder,
+  shiftStyle,
+  showDropIndicatorBefore,
+  showDropIndicatorAfter,
+  onTabDragStart,
+  onTabDragEnd,
+  onTabDragOver,
+  onTabDragLeave,
+  onTabDrop,
+  tabAnimationClass,
+}) => {
+  const isActive = useIsTabActive(tab.id);
+  const close = useCallback((event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    onClose(tab.id);
+  }, [onClose, tab.id]);
+  const tabBody = (
+        <div
+          data-tab-id={tab.id}
+          data-tab-type="plugin-view"
+          data-state={isActive ? 'active' : 'inactive'}
+          onClick={() => activeTabStore.setActiveTabId(tab.id)}
+          onMouseDown={handleTabMiddleMouseDown}
+          onAuxClick={(event) => handleTabMiddleClickClose(event, close)}
+          draggable
+          onDragStart={(event) => onTabDragStart(event, tab.id)}
+          onDragEnd={onTabDragEnd}
+          onDragOver={(event) => onTabDragOver(event, tab.id)}
+          onDragLeave={onTabDragLeave}
+          onDrop={(event) => onTabDrop(event, tab.id)}
+          className={cn(
+            'netcatty-tab relative h-7 min-w-[140px] max-w-[240px] flex-shrink-0 cursor-pointer items-center justify-between gap-2 overflow-hidden rounded-t-md pl-3 pr-2 text-xs font-semibold app-no-drag',
+            'flex transition-transform duration-150',
+            isBeingDragged && isDraggingForReorder && 'scale-95 opacity-40',
+            tabAnimationClass,
+          )}
+          style={{
+            ...shiftStyle,
+            backgroundColor: isActive ? 'var(--top-tabs-active-bg, hsl(var(--background)))' : 'transparent',
+            color: isActive ? 'var(--top-tabs-fg, hsl(var(--foreground)))' : 'var(--top-tabs-muted, hsl(var(--muted-foreground)))',
+          }}
+        >
+          {showDropIndicatorBefore && isDraggingForReorder && <div className="absolute -left-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
+          {showDropIndicatorAfter && isDraggingForReorder && <div className="absolute -right-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <PluginContributionIcon pluginId={tab.pluginId} icon={tab.icon} className="shrink-0" />
+            <span className="truncate">{tab.title}</span>
+          </div>
+          <button onClick={close} className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted" aria-label={t('tabs.closePluginViewAria', { title: tab.title })}><X size={12} /></button>
+        </div>
+  );
+  return (
+    <ContextMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <ContextMenuTrigger asChild>{tabBody}</ContextMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{tab.pluginName}</TooltipContent>
+      </Tooltip>
+      <ContextMenuContent>
+        <ContextMenuItem onClick={() => onClose(tab.id)}>{t('common.close')}</ContextMenuItem>
+        {renderBulkCloseItems(tab.id)}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+});
+PluginViewTopTab.displayName = 'PluginViewTopTab';
 
 interface EditorTopTabProps {
   tabId: string;
@@ -684,6 +780,8 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
         onCloseSession={onCloseSession}
         onCopySession={onCopySession}
         onCopySessionToNewWindow={onCopySessionToNewWindow}
+        onReconnectSession={terminalReconnectRegistry.request}
+        sessionStatus={session.status}
         onRenameSession={onRenameSession}
         renderBulkCloseItems={renderBulkCloseItems}
         t={t}

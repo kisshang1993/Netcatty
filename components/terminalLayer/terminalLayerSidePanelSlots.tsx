@@ -7,8 +7,10 @@ import {
   getSidePanelLiveSnapshot,
   subscribeSidePanelLiveSnapshot,
 } from '../../application/state/sidePanelLiveStore';
+import { resolveSystemSidebarSession } from '../../domain/systemManager/resolveSystemSession';
+import { shouldKeepTerminalBackgroundWorkActive } from '../../domain/terminalHibernate';
 import { resolveTerminalFontFamilyId } from '../../infrastructure/config/fonts';
-import type { Host } from '../../types';
+import type { Host, TerminalSession, Workspace } from '../../types';
 import { SystemManagerSidePanel } from '../systemManager/SystemManagerSidePanel';
 import { resolveSftpFollowTerminalCwdTargetHost } from '../sftp/sftpFollowTerminalCwd';
 import { AI_PANEL_FORCE_HIDE_SHELL } from '../ai/aiPanelDiagnostics';
@@ -51,6 +53,7 @@ function SidePanelSftpSlotInner({
     SftpSidePanel,
     effectiveHosts,
     hosts,
+    sessions,
     keys,
     identities,
     knownHosts,
@@ -62,6 +65,7 @@ function SidePanelSftpSlotInner({
     sftpPendingUploadsForTab,
     handleSftpInitialLocationApplied,
     handleSftpCurrentPathChange,
+    handleSftpActiveTransfersChange,
     handlePendingUploadHandled,
     sftpDoubleClickBehavior,
     sftpAutoSync,
@@ -134,11 +138,20 @@ function SidePanelSftpSlotInner({
     [handleSftpCurrentPathChange, live.activeTerminalSessionIdForSftp, live.focusedSessionId, tabId],
   );
 
+  const handleActiveTransfersChange = useCallback(
+    (count: number) => {
+      handleSftpActiveTransfersChange(tabId, count);
+    },
+    [handleSftpActiveTransfersChange, tabId],
+  );
+
   return (
     <div className={sidePanelHiddenPanelClassName(!isVisible)}>
       <SftpSidePanel
+        transferOwnerId={`terminal:${tabId}`}
         hosts={effectiveHosts}
         writableHosts={hosts}
+        sessions={sessions}
         keys={keys}
         identities={identities}
         knownHosts={knownHosts}
@@ -150,6 +163,7 @@ function SidePanelSftpSlotInner({
         initialLocation={isVisible ? (sftpInitialLocationForTab.get(tabId) ?? null) : null}
         onInitialLocationApplied={handleInitialLocationApplied}
         onCurrentPathChange={handleCurrentPathChange}
+        onActiveTransfersChange={handleActiveTransfersChange}
         showWorkspaceHostHeader={isVisible && !!live.activeWorkspace}
         isVisible={isVisible}
         renderOverlays={isVisible}
@@ -187,8 +201,25 @@ function SidePanelSystemSlotInner({
   const isTabActive = useIsTabActive(tabId);
   const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
   const sidePanelTab = useSidePanelTabType(tabId, sidePanelOpenTabs);
-  const isVisible = isTabActive && sidePanelTab === 'system';
-  const live = useSidePanelLiveSnapshotForTab(tabId, isTabActive);
+  const panelSelected = sidePanelTab === 'system';
+  const isVisible = isTabActive && panelSelected;
+  const sessions = ctx.sessions as TerminalSession[];
+  const sessionHostsMap = ctx.sessionHostsMap as Map<string, Host>;
+  const workspace = (ctx.workspaceById as Map<string, Workspace>).get(tabId);
+  const standaloneSession = sessions.find((session) => session.id === tabId);
+  const systemSession = resolveSystemSidebarSession(
+    sessions,
+    workspace,
+    workspace?.focusedSessionId,
+    standaloneSession,
+  );
+  const systemHost = systemSession ? sessionHostsMap.get(systemSession.id) ?? null : null;
+  const keepSystemWorkActive = panelSelected
+    && shouldKeepTerminalBackgroundWorkActive(
+      ctx.terminalSettings,
+      systemHost?.protocol,
+      isTabActive,
+    );
 
   const {
     refocusActiveTerminalSession,
@@ -199,11 +230,11 @@ function SidePanelSystemSlotInner({
   return (
     <div className={sidePanelHiddenPanelClassName(!isVisible)}>
       <SystemManagerSidePanel
-        key={live.activeTerminalSessionForSystem?.id ?? 'system-none'}
-        session={live.activeTerminalSessionForSystem ?? null}
-        sessionHost={live.activeSystemSessionHost ?? null}
-        showWorkspaceHostHeader={isVisible && !!live.activeWorkspace}
-        isVisible={isVisible}
+        key={systemSession?.id ?? 'system-none'}
+        session={systemSession ?? null}
+        sessionHost={systemHost}
+        showWorkspaceHostHeader={isVisible && !!workspace}
+        isVisible={keepSystemWorkActive}
         terminalSettings={terminalSettings}
         snippets={snippets}
         onRequestTerminalFocus={refocusActiveTerminalSession}

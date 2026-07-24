@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { sftpPickerSessionsEqual } from '../../domain/sftpConnectedHosts';
+
 type Ctx = Record<string, any>;
 
 function eq(prev: Ctx, next: Ctx, key: string): boolean {
@@ -158,6 +160,16 @@ function sidePanelCtxKeyEqual(prev: Ctx, next: Ctx, key: string): boolean {
   if (key === 'terminalTheme') {
     return terminalThemeEqual(prev, next, key);
   }
+  if (key === 'sessions') {
+    // Connected picker and retained system panels need transport and tab ownership,
+    // while title/cwd churn can still be ignored.
+    if (prev.sessions === next.sessions) return true;
+    if (!sftpPickerSessionsEqual(prev.sessions, next.sessions)) return false;
+    if (!Array.isArray(prev.sessions) || !Array.isArray(next.sessions)) return false;
+    return prev.sessions.every((session: any, index: number) => (
+      session.workspaceId === next.sessions[index]?.workspaceId
+    ));
+  }
   return prev[key] === next[key];
 }
 
@@ -204,6 +216,10 @@ const SIDE_PANEL_STABLE_CTX_KEYS = [
   'sftpHostForTab',
   'effectiveHosts',
   'hosts',
+  // SFTP Connected picker reads live terminal sessions from stable ctx.
+  'sessions',
+  'sessionHostsMap',
+  'workspaceById',
   'keys',
   'identities',
   'updateHosts',
@@ -292,6 +308,7 @@ const WORKSPACE_CTX_KEYS = [
   'sessionHostsMap',
   'sessionChainHostsMap',
   'sessionSudoAutofillPasswordsMap',
+  'sessionSudoAutofillCandidatesMap',
   'workspaceById',
   'workspaceRectsById',
   'isTerminalLayerVisible',
@@ -394,6 +411,7 @@ export function terminalLayerWorkspaceCtxEqual(prev: Ctx, next: Ctx): boolean {
 
 export function terminalLayerViewCtxEqual(prev: Ctx, next: Ctx): boolean {
   if (prev.isTerminalLayerVisible !== next.isTerminalLayerVisible) return false;
+  if (prev.hibernateHiddenTabs !== next.hibernateHiddenTabs) return false;
   if (prev.isComposeBarOpen !== next.isComposeBarOpen) return false;
   if (!activeWorkspaceEqual(prev.activeWorkspace, next.activeWorkspace)) return false;
   if (prev.focusedSessionId !== next.focusedSessionId) return false;

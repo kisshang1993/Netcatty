@@ -39,6 +39,40 @@ test("buildSessionRestorePayload stores restored sessions as disconnected and dr
   assert.equal(payload.sessions[0].restoreState, "restored-disconnected");
 });
 
+test("buildSessionRestorePayload excludes ephemeral-host sessions and their tabs", () => {
+  const payload = buildSessionRestorePayload({
+    sessions: [
+      session("s1"),
+      { ...session("s2"), ephemeralHost: true },
+    ],
+    workspaces: [],
+    tabOrder: ["s1", "s2"],
+    activeTabId: "s2",
+    now: 123,
+  });
+
+  assert.deepEqual(payload.sessions.map((entry) => entry.id), ["s1"]);
+  assert.deepEqual(payload.tabOrder, ["s1"]);
+  assert.notEqual(payload.activeTabId, "s2");
+});
+
+test("buildSessionRestorePayload excludes silent MCP sessions and their tabs", () => {
+  const payload = buildSessionRestorePayload({
+    sessions: [
+      session("s1"),
+      { ...session("s2"), hiddenFromTabs: true },
+    ],
+    workspaces: [],
+    tabOrder: ["s1", "s2"],
+    activeTabId: "s2",
+    now: 123,
+  });
+
+  assert.deepEqual(payload.sessions.map((entry) => entry.id), ["s1"]);
+  assert.deepEqual(payload.tabOrder, ["s1"]);
+  assert.notEqual(payload.activeTabId, "s2");
+});
+
 test("buildSessionRestorePayload only stores allowlisted session fields", () => {
   const payload = buildSessionRestorePayload({
     sessions: [{
@@ -64,6 +98,22 @@ test("buildSessionRestorePayload only stores allowlisted session fields", () => 
   ].sort());
 });
 
+test("buildSessionRestorePayload preserves local terminal start directory", () => {
+  const payload = buildSessionRestorePayload({
+    sessions: [{
+      ...session("s1"),
+      protocol: "local",
+      localStartDir: "/Users/alice/project",
+    }],
+    workspaces: [],
+    tabOrder: ["s1"],
+    activeTabId: "s1",
+    now: 123,
+  });
+
+  assert.equal(payload.sessions[0].localStartDir, "/Users/alice/project");
+});
+
 test("buildSessionRestorePayload deeply allowlists serial config fields", () => {
   const payload = buildSessionRestorePayload({
     sessions: [{
@@ -78,6 +128,7 @@ test("buildSessionRestorePayload deeply allowlists serial config fields", () => 
         flowControl: "none",
         localEcho: true,
         lineMode: true,
+        backspaceBehavior: "ctrl-h",
         password: "do-not-store",
       },
     } as TerminalSession & { serialConfig: TerminalSession["serialConfig"] & { password: string } }],
@@ -96,6 +147,7 @@ test("buildSessionRestorePayload deeply allowlists serial config fields", () => 
     flowControl: "none",
     localEcho: true,
     lineMode: true,
+    backspaceBehavior: "ctrl-h",
   });
 });
 
@@ -119,6 +171,26 @@ test("buildSessionRestorePayload preserves serial sessions with empty usernames"
   assert.equal(payload.sessions.length, 1);
   assert.equal(payload.sessions[0].username, "");
   assert.equal(payload.sessions[0].protocol, "serial");
+});
+
+test("buildSessionRestorePayload preserves missing Backspace behavior on legacy serial sessions", () => {
+  const payload = buildSessionRestorePayload({
+    sessions: [{
+      ...session("s1"),
+      username: "",
+      protocol: "serial",
+      serialConfig: {
+        path: "/dev/tty.usbserial",
+        baudRate: 115200,
+      },
+    }],
+    workspaces: [],
+    tabOrder: ["s1"],
+    activeTabId: "s1",
+    now: 123,
+  });
+
+  assert.equal(payload.sessions[0].serialConfig?.backspaceBehavior, undefined);
 });
 
 test("buildSessionRestorePayload preserves serial-only workspaces", () => {
@@ -214,6 +286,23 @@ test("sanitizeSessionRestorePayload drops malformed session and workspace record
   assert.deepEqual(sanitized.workspaces, []);
   assert.deepEqual(sanitized.tabOrder, ["s1"]);
   assert.equal(sanitized.activeTabId, "s1");
+});
+
+test("sanitizeSessionRestorePayload preserves local terminal start directory", () => {
+  const sanitized = sanitizeSessionRestorePayload({
+    version: 1,
+    savedAt: 1,
+    activeTabId: "s1",
+    tabOrder: ["s1"],
+    sessions: [{
+      ...session("s1"),
+      protocol: "local",
+      localStartDir: "/Users/alice/project",
+    }],
+    workspaces: [],
+  });
+
+  assert.equal(sanitized.sessions[0].localStartDir, "/Users/alice/project");
 });
 
 test("sanitizeSessionRestorePayload enforces workspace session ownership", () => {
@@ -336,6 +425,7 @@ test("sanitizeSessionRestorePayload deeply allowlists unknown serial config fiel
         flowControl: "none",
         localEcho: true,
         lineMode: true,
+        backspaceBehavior: "default",
         secret: "do-not-store",
       },
     }],
@@ -351,6 +441,7 @@ test("sanitizeSessionRestorePayload deeply allowlists unknown serial config fiel
     flowControl: "none",
     localEcho: true,
     lineMode: true,
+    backspaceBehavior: "default",
   });
 });
 

@@ -7,6 +7,8 @@ import type { TerminalPopupPayload } from '../domain/systemManager/types';
 import { resolveTerminalPopupHost, resolveTerminalPopupReuseId } from './TerminalPopupPage';
 
 const source = readFileSync(new URL('./TerminalPopupPage.tsx', import.meta.url), 'utf8');
+const terminalSource = readFileSync(new URL('./Terminal.tsx', import.meta.url), 'utf8');
+const terminalLayerSource = readFileSync(new URL('./TerminalLayer.tsx', import.meta.url), 'utf8');
 
 const vaultHost = (overrides: Partial<Host> = {}): Host => ({
   id: 'host-1',
@@ -70,6 +72,28 @@ test('resolveTerminalPopupHost does not turn command popups into serial sessions
   assert.equal(host.moshEnabled, false);
 });
 
+test('resolveTerminalPopupHost preserves serial settings when attaching a live session', () => {
+  const serialConfig = {
+    path: '/dev/ttyUSB0',
+    baudRate: 115200,
+    lineMode: true,
+    localEcho: true,
+  } as const;
+  const payload = popupPayload(sourceSession({
+    protocol: 'serial',
+    hostname: serialConfig.path,
+    port: serialConfig.baudRate,
+    serialConfig,
+  }));
+  payload.attachSessionId = payload.sourceSession.id;
+
+  const host = resolveTerminalPopupHost(payload, [vaultHost({ protocol: 'serial', serialConfig })]);
+
+  assert.equal(host.protocol, 'serial');
+  assert.deepEqual(host.serialConfig, serialConfig);
+  assert.match(source, /serialConfig=\{isAttachMode \? config\.sourceSession\.serialConfig : undefined\}/);
+});
+
 test('resolveTerminalPopupReuseId uses the explicit reuse id from the prepared source session', () => {
   assert.equal(
     resolveTerminalPopupReuseId(popupPayload(sourceSession({ reuseConnectionFromSessionId: 'session-1' }))),
@@ -87,4 +111,46 @@ test('popup terminals resolve complete host config and pass jump hosts into Term
   assert.match(source, /resolveTerminalPopupHost\(config,\s*hosts,\s*\{\s+groupConfigs,\s+proxyProfiles,/);
   assert.match(source, /resolveTerminalChainHosts\(\{\s+host,\s+hosts,\s+groupConfigs,\s+proxyProfiles,/);
   assert.match(source, /chainHosts=\{chainHosts\}/);
+});
+
+test('attach popup close preparation has a bounded timeout', () => {
+  assert.match(source, /Promise\.race\(\[/);
+  assert.match(source, /Attach close preparation timed out/);
+  assert.match(source, /1500/);
+});
+
+test('terminal exit auto-close setting reaches tabs, workspaces, and popups', () => {
+  assert.match(
+    terminalLayerSource,
+    /resolveTerminalSessionExitIntent\(\s+evt,\s+terminalSettings\?\.autoCloseOnExit \?\? true,\s+\)/,
+  );
+  assert.match(
+    terminalSource,
+    /const onSessionExitRef = useRef\(onSessionExit\);[\s\S]*?useLayoutEffect\(\(\) => \{\s+onSessionExitRef\.current = onSessionExit;\s+\}, \[onSessionExit\]\);/,
+  );
+  assert.match(
+    terminalSource,
+    /onSessionExitRef\.current\?\.\(closedSessionId, evt\)/,
+  );
+  assert.match(
+    source,
+    /shouldCloseTerminalPopupOnExit\(evt, \{\s+autoCloseOnExit: settings\.terminalSettings\.autoCloseOnExit,\s+isAttachMode,\s+\}\)/,
+  );
+  assert.match(
+    source,
+    /shouldRevealTerminalPopupOnExit\(evt, \{\s+autoCloseOnExit: settings\.terminalSettings\.autoCloseOnExit,\s+isAttachMode,\s+\}\)[\s\S]*?revealTerminal\(\);\s+return;[\s\S]*?setStartupError/,
+  );
+});
+
+test('an attached observe popup never owns automatic reconnect', () => {
+  const reconnectStart = terminalSource.indexOf('const scheduleAutoReconnect = useCallback');
+  const reconnectEnd = terminalSource.indexOf('const prepareRestoredReconnect', reconnectStart);
+  const reconnectSource = terminalSource.slice(reconnectStart, reconnectEnd);
+  assert.match(reconnectSource, /if \(attachExistingSession\) return false;/);
+  assert.match(reconnectSource, /\[attachExistingSession, host, t, terminalSettings, updateStatus\]/);
+  assert.match(terminalSource, /const startReconnect = async[\s\S]*?if \(attachExistingSession\) return;/);
+  assert.match(
+    terminalSource,
+    /useEffect\(\(\) => \{\s+if \(attachExistingSession\) return undefined;\s+return terminalReconnectRegistry\.register/,
+  );
 });

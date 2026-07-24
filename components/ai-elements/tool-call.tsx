@@ -145,11 +145,13 @@ export interface ToolCallProps extends HTMLAttributes<HTMLDivElement> {
   onApproveOnce?: () => void;
   /** Called when user approves and persists an always-allow grant rule. */
   onAlwaysAllow?: () => void;
+  /** Optional source-specific label for the persistent/session approval action. */
+  alwaysAllowLabel?: string;
 }
 
 export const ToolCall = ({
   name, args, result, isError, isLoading, isInterrupted,
-  approvalStatus, onApprove, onReject, onApproveOnce, onAlwaysAllow,
+  approvalStatus, onApprove, onReject, onApproveOnce, onAlwaysAllow, alwaysAllowLabel,
   className, ...props
 }: ToolCallProps) => {
   const { t } = useI18n();
@@ -187,12 +189,12 @@ export const ToolCall = ({
 
   // Auto-focus and auto-scroll when approval is pending
   useEffect(() => {
-    if (isPendingApproval && cardRef.current) {
-      cardRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-      // Small delay to let the UI render, then expand and focus
-      setExpanded(true);
-      setTimeout(() => approveBtnRef.current?.focus(), 100);
-    }
+    if (!isPendingApproval || !cardRef.current) return;
+    cardRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    // Small delay to let the UI render, then expand and focus
+    setExpanded(true);
+    const focusTimer = setTimeout(() => approveBtnRef.current?.focus(), 100);
+    return () => clearTimeout(focusTimer);
   }, [isPendingApproval]);
 
   // Reset responded state when approvalStatus changes (e.g. new approval)
@@ -307,15 +309,17 @@ export const ToolCall = ({
                   <Check size={12} className="shrink-0" />
                   <span className="truncate">{t('ai.chat.approveOnce')}</span>
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 min-w-0 flex-1 gap-1 px-1.5 text-[11px] font-normal border-green-500/35 text-green-300/95 hover:bg-green-500/10 hover:text-green-300 hover:border-green-500/50"
-                  onClick={handleAlwaysAllow}
-                >
-                  <Check size={12} className="shrink-0" />
-                  <span className="truncate">{t('ai.chat.alwaysAllow')}</span>
-                </Button>
+                {onAlwaysAllow && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 min-w-0 flex-1 gap-1 px-1.5 text-[11px] font-normal border-green-500/35 text-green-300/95 hover:bg-green-500/10 hover:text-green-300 hover:border-green-500/50"
+                    onClick={handleAlwaysAllow}
+                  >
+                    <Check size={12} className="shrink-0" />
+                    <span className="truncate">{alwaysAllowLabel || t('ai.chat.alwaysAllow')}</span>
+                  </Button>
+                )}
               </div>
             </div>
           )}

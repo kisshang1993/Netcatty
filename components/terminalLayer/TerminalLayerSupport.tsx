@@ -7,8 +7,13 @@ import { createTerminalSelectionAttachment } from '../../application/state/termi
 import { getTopTabInsertionTarget, isPointInsideRect, WORKSPACE_SESSION_DRAG_TYPE } from '../../application/state/terminalDragData';
 import { useAIState } from '../../application/state/useAIState';
 import { useStoredBoolean } from '../../application/state/useStoredBoolean';
+import { isSavedVaultHost } from '../../domain/ephemeralHosts';
 import { collectSessionIds, SplitDirection } from '../../domain/workspace';
 import { resolveSessionTabTitle } from '../../domain/sessionTabTitle';
+import {
+  resolveTerminalHibernateEnabled,
+  resolveTerminalHibernateEnabledForProtocol,
+} from '../../domain/terminalHibernate';
 import { KeyBinding, TerminalSettings } from '../../domain/models';
 import { STORAGE_KEY_AI_SHOW_TERMINAL_SELECTION_ACTION } from '../../infrastructure/config/storageKeys';
 import { cn } from '../../lib/utils';
@@ -23,7 +28,8 @@ import type { TerminalContextReader } from '../../domain/terminalContextRead';
 import {
   getTerminalPaneRenderSnapshot,
   parseTerminalPaneRenderSnapshot,
-  resolveHiddenTerminalPaneStyle,
+  resolveInactiveTerminalPaneStyle,
+  shouldUseTerminalPaneSplitLayout,
   type TerminalPaneHiddenSize,
 } from '../terminalPaneVisibility';
 import type { ResolvedAppearance, TerminalAppearanceHostScope } from '../../domain/terminalAppearanceRuntime';
@@ -681,7 +687,7 @@ export interface TerminalLayerProps {
   // Session log settings for real-time streaming
   sessionLogsEnabled?: boolean;
   sessionLogsDir?: string;
-  sessionLogsFormat?: string;
+  sessionLogsFormat?: "txt" | "raw" | "html";
   sessionLogsTimestampsEnabled?: boolean;
   sshDebugLogsEnabled?: boolean;
   showHostTreeSidebar?: boolean;
@@ -698,6 +704,7 @@ interface TerminalPaneProps {
   sessionHostResolved: boolean;
   chainHosts?: Host[];
   sudoAutofillPassword?: string;
+  sudoAutofillCandidates?: import("../terminal/runtime/terminalSudoAutofill").SudoPasswordAutofillCandidate[];
   workspaceById: Map<string, Workspace>;
   workspaceRectsById: Map<string, Record<string, WorkspaceRect>>;
   isTerminalLayerVisible: boolean;
@@ -724,7 +731,7 @@ interface TerminalPaneProps {
   keyBindings?: KeyBinding[];
   isResizing: boolean;
   isComposeBarOpen: boolean;
-  sessionLog?: { enabled: true; directory: string; format: string; timestampsEnabled?: boolean };
+  sessionLog?: { enabled: boolean; directory: string; format: "txt" | "raw" | "html"; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onTerminalFontSizeChange?: (sessionId: string, fontSize: number) => void;
@@ -760,7 +767,7 @@ interface TerminalPaneProps {
     data: string,
     sourceSessionId: string,
     options?: TerminalBroadcastInputOptions,
-  ) => void;
+  ) => string[] | void;
   onToggleWorkspaceComposeBar: () => void;
   onBroadcastInterruptPriorityChange: (
     sessionId: string,
@@ -787,7 +794,7 @@ interface TerminalPaneProps {
 }
 
 const getPaneAppearanceThemeId = (props: TerminalPaneProps): string => {
-  const isEphemeral = !props.hostMap.has(props.host.id);
+  const isEphemeral = !isSavedVaultHost(props.hostMap.get(props.host.id));
   return props.resolveSessionAppearance({ host: props.host, isEphemeral }).themeId;
 };
 
@@ -797,12 +804,18 @@ const getPaneWorkspaceRect = (props: Pick<TerminalPaneProps, 'session' | 'worksp
   return props.workspaceRectsById.get(workspaceId)?.[props.session.id] ?? null;
 };
 
-const getPaneActiveWorkspaceRect = (props: Pick<TerminalPaneProps, 'session' | 'workspaceById' | 'workspaceRectsById'>): WorkspaceRect | null => {
+const getPaneRenderedWorkspaceRect = (props: Pick<TerminalPaneProps, 'session' | 'host' | 'workspaceById' | 'workspaceRectsById' | 'terminalSettings'>): WorkspaceRect | null => {
   const workspaceId = props.session.workspaceId;
   if (!workspaceId) return null;
-  if (activeTabStore.getActiveTabId() !== workspaceId) return null;
   const workspace = props.workspaceById.get(workspaceId);
-  if (!workspace || workspace.viewMode === 'focus') return null;
+  if (!workspace) return null;
+  if (resolveTerminalHibernateEnabledForProtocol(props.terminalSettings, props.host.protocol)
+    && activeTabStore.getActiveTabId() !== workspaceId) {
+    return null;
+  }
+  if (workspace.viewMode === 'focus' && workspace.focusedSessionId === props.session.id) {
+    return null;
+  }
   return props.workspaceRectsById.get(workspaceId)?.[props.session.id] ?? null;
 };
 
@@ -821,8 +834,9 @@ const terminalPanePropsAreEqual = (
   prev.sessionHostResolved === next.sessionHostResolved &&
   prev.chainHosts === next.chainHosts &&
   prev.sudoAutofillPassword === next.sudoAutofillPassword &&
+  prev.sudoAutofillCandidates === next.sudoAutofillCandidates &&
   prev.workspaceById === next.workspaceById &&
-  workspaceRectsEqual(getPaneActiveWorkspaceRect(prev), getPaneActiveWorkspaceRect(next)) &&
+  workspaceRectsEqual(getPaneRenderedWorkspaceRect(prev), getPaneRenderedWorkspaceRect(next)) &&
   prev.isTerminalLayerVisible === next.isTerminalLayerVisible &&
   prev.workspaceFocusHandlersRef === next.workspaceFocusHandlersRef &&
   prev.workspaceBroadcastHandlersRef === next.workspaceBroadcastHandlersRef &&
@@ -891,6 +905,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   sessionHostResolved,
   chainHosts,
   sudoAutofillPassword,
+  sudoAutofillCandidates,
   workspaceById,
   workspaceRectsById,
   isTerminalLayerVisible,
@@ -975,19 +990,29 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const isVisible = paneState.isVisible;
   const paneElementRef = useRef<HTMLDivElement | null>(null);
   const lastVisiblePaneSizeRef = useRef<TerminalPaneHiddenSize | null>(null);
+  const [, bumpHiddenPaneSizeVersion] = useState(0);
 
-  // Publish visibility to the per-session store so TerminalServerStats /
-  // TerminalAutocomplete can self-subscribe — keeping isVisible out of the
-  // TerminalView ctx so visibility toggles don't re-render TerminalView.
-  useEffect(() => {
+  // Publish visibility before paint so hibernate / write-path readers see the
+  // new value in the same frame as the CSS hide/show (#1985).
+  useLayoutEffect(() => {
     setPaneVisible(session.id, isVisible);
   }, [session.id, isVisible]);
   useEffect(() => () => removePaneVisible(session.id), [session.id]);
   const inActiveWorkspace = !!activeWorkspaceId;
   const isFocusMode = paneState.mode === 'focus';
   const isSplitViewVisible = paneState.mode === 'split';
-  const rect = activeWorkspaceId && isSplitViewVisible
-    ? workspaceRectsById.get(activeWorkspaceId)?.[session.id] ?? null
+  const hibernateHiddenTabs = resolveTerminalHibernateEnabledForProtocol(terminalSettings, host.protocol);
+  const layoutWorkspaceId = activeWorkspaceId ?? (!hibernateHiddenTabs ? session.workspaceId : undefined);
+  const layoutWorkspace = layoutWorkspaceId ? workspaceById.get(layoutWorkspaceId) : undefined;
+  const keepsWorkspacePresentation = !!layoutWorkspace;
+  const usesSplitLayout = shouldUseTerminalPaneSplitLayout({
+    workspace: layoutWorkspace,
+    sessionId: session.id,
+    isVisible,
+    hibernateHiddenTabs,
+  });
+  const rect = layoutWorkspaceId && usesSplitLayout
+    ? workspaceRectsById.get(layoutWorkspaceId)?.[session.id] ?? null
     : null;
   const layoutStyle = rect
     ? {
@@ -997,7 +1022,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
       height: `${rect.h}px`,
     }
     : { left: 0, top: 0, width: '100%', height: '100%' };
-  const livePaneLayoutKey = isSplitViewVisible && rect
+  const livePaneLayoutKey = usesSplitLayout && rect
     ? `${Math.round(rect.w)}x${Math.round(rect.h)}`
     : 'full';
   const paneLayoutKeyRef = useRef(livePaneLayoutKey);
@@ -1038,23 +1063,58 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const style: React.CSSProperties = { ...layoutStyle };
 
   useLayoutEffect(() => {
-    if (!isVisible) return;
     const element = paneElementRef.current;
     if (!element) return;
-    const width = element.clientWidth;
-    const height = element.clientHeight;
-    if (width > 0 && height > 0) {
+
+    const capturePaneSize = () => {
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      if (width <= 0 || height <= 0) return false;
       lastVisiblePaneSizeRef.current = { width, height };
+      return true;
+    };
+
+    if (isVisible) {
+      capturePaneSize();
+      const observer = new ResizeObserver(() => {
+        capturePaneSize();
+      });
+      observer.observe(element);
+      return () => observer.disconnect();
     }
+
+    const initializeHiddenFullSize = !hibernateHiddenTabs
+      && !rect
+      && !lastVisiblePaneSizeRef.current;
+    if (!initializeHiddenFullSize) return;
+    if (capturePaneSize()) {
+      bumpHiddenPaneSizeVersion((version) => version + 1);
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (!capturePaneSize()) return;
+      observer.disconnect();
+      bumpHiddenPaneSizeVersion((version) => version + 1);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
   }, [
+    hibernateHiddenTabs,
     isVisible,
     layoutStyle.height,
     layoutStyle.width,
     activeWorkspaceId,
+    rect,
   ]);
 
   if (!isVisible) {
-    Object.assign(style, resolveHiddenTerminalPaneStyle(style, lastVisiblePaneSizeRef.current));
+    Object.assign(style, resolveInactiveTerminalPaneStyle(
+      style,
+      lastVisiblePaneSizeRef.current,
+      hibernateHiddenTabs,
+      !rect,
+    ));
   }
 
   const workspaceFocusHandler = activeWorkspaceId
@@ -1066,7 +1126,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const splitHorizontalHandler = splitHorizontalHandlersRef.current.get(session.id);
   const splitVerticalHandler = splitVerticalHandlersRef.current.get(session.id);
   const broadcastEnabled = activeWorkspaceId ? !!isBroadcastEnabled?.(activeWorkspaceId) : false;
-  const isHostEphemeral = !hostMap.has(host.id);
+  const isHostEphemeral = !isSavedVaultHost(hostMap.get(host.id));
   const sessionAppearance = useMemo(
     () => resolveSessionAppearance({ host, isEphemeral: isHostEphemeral }),
     [resolveSessionAppearance, host, isHostEphemeral],
@@ -1278,6 +1338,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
       data-session-id={session.id}
       data-section="terminal-split-pane"
       data-focused={isFocusedPane ? 'true' : undefined}
+      inert={isVisible ? undefined : true}
       className={cn(
         "absolute bg-background",
         inActiveWorkspace && "workspace-pane",
@@ -1297,9 +1358,9 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         knownHosts={knownHosts}
         isVisible={isVisible}
         paneLayoutKey={paneLayoutKey}
-        inWorkspace={inActiveWorkspace}
+        inWorkspace={keepsWorkspacePresentation}
         isResizing={isResizing}
-        isFocusMode={isFocusMode}
+        isFocusMode={layoutWorkspace?.viewMode === 'focus'}
         isFocused={isFocusedPane}
         fontFamilyId={terminalFontFamilyId}
         fontSize={fontSize}
@@ -1309,6 +1370,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         customAccent={customAccent}
         terminalSettings={terminalSettings}
         sessionId={session.id}
+        workspaceId={session.workspaceId}
         restoreState={session.restoreState}
         shellType={session.shellType}
         lastCwd={session.lastCwd}
@@ -1358,6 +1420,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         sessionLog={sessionLog}
         sshDebugLogEnabled={sshDebugLogEnabled}
         sudoAutofillPassword={sudoAutofillPassword}
+        sudoAutofillCandidates={sudoAutofillCandidates}
         sessionDisplayName={resolveSessionTabTitle(session, terminalSettings?.dynamicTabTitleMode)}
         showSelectionAIAction={showSelectionAIAction}
         onAddSelectionToAI={onAddSelectionToAI}
@@ -1379,6 +1442,10 @@ interface TerminalPanesHostProps {
   sessionHostsMap: Map<string, Host>;
   sessionChainHostsMap: Map<string, Host[]>;
   sessionSudoAutofillPasswordsMap: Map<string, string | undefined>;
+  sessionSudoAutofillCandidatesMap: Map<
+    string,
+    import("../terminal/runtime/terminalSudoAutofill").SudoPasswordAutofillCandidate[] | undefined
+  >;
   resolvedSessionHostIds: Set<string>;
   workspaceById: Map<string, Workspace>;
   workspaceRectsById: Map<string, Record<string, WorkspaceRect>>;
@@ -1406,7 +1473,7 @@ interface TerminalPanesHostProps {
   keyBindings?: KeyBinding[];
   isResizing: boolean;
   isComposeBarOpen: boolean;
-  sessionLog?: { enabled: true; directory: string; format: string; timestampsEnabled?: boolean };
+  sessionLog?: { enabled: boolean; directory: string; format: "txt" | "raw" | "html"; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onTerminalFontSizeChange?: TerminalPaneProps['onTerminalFontSizeChange'];
@@ -1437,7 +1504,7 @@ interface TerminalPanesHostProps {
     data: string,
     sourceSessionId: string,
     options?: TerminalBroadcastInputOptions,
-  ) => void;
+  ) => string[] | void;
   onToggleWorkspaceComposeBar: () => void;
   onBroadcastInterruptPriorityChange: (
     sessionId: string,
@@ -1464,6 +1531,7 @@ const terminalPanesHostPropsAreEqual = (
   if (prev.sessionHostsMap !== next.sessionHostsMap) return false;
   if (prev.sessionChainHostsMap !== next.sessionChainHostsMap) return false;
   if (prev.sessionSudoAutofillPasswordsMap !== next.sessionSudoAutofillPasswordsMap) return false;
+  if (prev.sessionSudoAutofillCandidatesMap !== next.sessionSudoAutofillCandidatesMap) return false;
   if (prev.resolvedSessionHostIds !== next.resolvedSessionHostIds) return false;
   if (prev.workspaceById !== next.workspaceById) return false;
   if (prev.isTerminalLayerVisible !== next.isTerminalLayerVisible) return false;
@@ -1530,12 +1598,21 @@ const terminalPanesHostPropsAreEqual = (
 
   if (prev.workspaceRectsById === next.workspaceRectsById) return true;
 
+  if (!resolveTerminalHibernateEnabled(next.terminalSettings)) {
+    return prev.sessions.every((session) => workspaceRectsEqual(
+      getPaneWorkspaceRect({ session, workspaceRectsById: prev.workspaceRectsById }),
+      getPaneWorkspaceRect({ session, workspaceRectsById: next.workspaceRectsById }),
+    ));
+  }
+
   const activeTabId = activeTabStore.getActiveTabId();
   const activeWorkspace = activeTabId ? next.workspaceById.get(activeTabId) : undefined;
-  if (!activeWorkspace || activeWorkspace.viewMode === 'focus') return true;
 
   return prev.sessions.every((session) => {
-    if (session.workspaceId !== activeWorkspace.id) return true;
+    const isLocalTerminal = next.sessionHostsMap.get(session.id)?.protocol === 'local';
+    const isInVisibleSplitWorkspace = activeWorkspace?.viewMode !== 'focus'
+      && session.workspaceId === activeWorkspace?.id;
+    if (!isLocalTerminal && !isInVisibleSplitWorkspace) return true;
     return workspaceRectsEqual(
       getPaneWorkspaceRect({ session, workspaceRectsById: prev.workspaceRectsById }),
       getPaneWorkspaceRect({ session, workspaceRectsById: next.workspaceRectsById }),
@@ -1548,6 +1625,7 @@ export const TerminalPanesHost: React.FC<TerminalPanesHostProps> = memo(({
   sessionHostsMap,
   sessionChainHostsMap,
   sessionSudoAutofillPasswordsMap,
+  sessionSudoAutofillCandidatesMap,
   resolvedSessionHostIds,
   ...sharedProps
 }) => {
@@ -1569,6 +1647,7 @@ export const TerminalPanesHost: React.FC<TerminalPanesHostProps> = memo(({
             sessionHostResolved={resolvedSessionHostIds.has(session.id)}
             chainHosts={sessionChainHostsMap.get(session.id)}
             sudoAutofillPassword={sessionSudoAutofillPasswordsMap.get(session.id)}
+            sudoAutofillCandidates={sessionSudoAutofillCandidatesMap.get(session.id)}
             showSelectionAIAction={showSelectionAIAction}
             {...sharedProps}
           />

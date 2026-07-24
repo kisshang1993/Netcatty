@@ -12,7 +12,7 @@ import {
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
 import { useApplicationBackend } from "../application/state/useApplicationBackend";
-import { resolveGroupDefaults, resolveGroupTerminalThemeId } from "../domain/groupConfig";
+import { applyGroupDefaults, resolveGroupDefaults, resolveGroupTerminalThemeId } from "../domain/groupConfig";
 import {
   getEffectiveHostDistro,
   normalizePrimaryTelnetState,
@@ -22,6 +22,7 @@ import {
   formatProxyConfigType,
   updateProxyConfigField,
 } from "../domain/proxyProfiles";
+import { hasRequiredHostAuthCredential, resolveHostAuth, resolveHostAuthMethodForPersistence } from "../domain/sshAuth";
 import { customThemeStore } from "../application/state/customThemeStore";
 import {
   hasHostFontSizeOverride,
@@ -40,7 +41,7 @@ import {
   type AsidePanelResizeProps,
 } from "./ui/aside-panel";
 import { HostDetailsAdvancedSections } from "./HostDetailsAdvancedSections";
-import { HostDetailsConnectionSections } from "./HostDetailsConnectionSections";
+import { detachEffectiveHostIdentity, HostDetailsConnectionSections } from "./HostDetailsConnectionSections";
 import {
   LINUX_DISTRO_OPTION_IDS,
   parseOptionalPortInput,
@@ -53,6 +54,7 @@ import {
   prepareProxyConfigForSave,
 } from "./HostDetailsPanel.helpers";
 export { parseOptionalPortInput } from "./HostDetailsPanel.helpers";
+import { TerminalEncodingSelect } from "./TerminalEncodingSelect";
 import { Button } from "./ui/button";
 import { Combobox, ComboboxOption, MultiCombobox } from "./ui/combobox";
 import { Input } from "./ui/input";
@@ -104,6 +106,7 @@ interface HostDetailsPanelProps {
   onImportKey?: (draft: Partial<SSHKey>) => SSHKey;
   snippets?: Snippet[];
   onSnippetsChange?: (snippets: Snippet[]) => void;
+  className?: string;
 }
 
 type HostDetailsPanelPropsWithResize = HostDetailsPanelProps & AsidePanelResizeProps;
@@ -130,6 +133,7 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
   onImportKey,
   snippets = [],
   onSnippetsChange,
+  className,
   resizable,
   persistWidthStorageKey,
   resizeAriaLabel,
@@ -153,7 +157,8 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
         protocol: "ssh",
         tags: [],
         os: "linux",
-        authMethod: "password",
+        authMethod: undefined,
+        authPolicyVersion: 1,
         charset: groupDefaults?.charset ? undefined : "UTF-8",
         distroMode: "auto",
         createdAt: Date.now(),
@@ -187,12 +192,23 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
   } | null>(null);
 
   useEffect(() => {
-    if (form.agentForwarding) {
-      checkSshAgent().then(setSshAgentStatus);
+    let cancelled = false;
+    if (form.agentForwarding || form.useSshAgent === true) {
+      void checkSshAgent({
+        identityAgent: form.useSshAgent === true ? form.identityAgent : undefined,
+        hostname: form.hostname,
+        port: form.port,
+        username: form.username,
+      }).then((status) => {
+        if (!cancelled) setSshAgentStatus(status);
+      });
     } else {
       setSshAgentStatus(null);
     }
-  }, [form.agentForwarding, checkSshAgent]);
+    return () => {
+      cancelled = true;
+    };
+  }, [form.agentForwarding, form.useSshAgent, form.identityAgent, form.hostname, form.port, form.username, checkSshAgent]);
 
   const [groupInputValue, setGroupInputValue] = useState(form.group || "");
 
@@ -255,6 +271,23 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
     }
     return groupDefaults;
   }, [defaultGroup, form.group, groupConfigs, groupDefaults]);
+
+  const effectiveAuthHost = useMemo(
+    () => effectiveGroupDefaults ? applyGroupDefaults(form, effectiveGroupDefaults) : form,
+    [effectiveGroupDefaults, form],
+  );
+
+  const selectedIdentity = useMemo(() => {
+    if (!effectiveAuthHost.identityId) return undefined;
+    return identities.find((i) => i.id === effectiveAuthHost.identityId);
+  }, [effectiveAuthHost.identityId, identities]);
+
+  const effectiveAuth = useMemo(() => resolveHostAuth({
+    host: effectiveAuthHost,
+    keys: availableKeys,
+    identities,
+  }), [availableKeys, effectiveAuthHost, identities]);
+  const effectiveAuthMethod = effectiveAuth.authMethod;
 
   const effectiveThemeId = useMemo(
     () => resolveHostTerminalThemeId(form, resolveGroupTerminalThemeId(effectiveGroupDefaults, terminalThemeId)),
@@ -403,6 +436,10 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
   const handleSubmit = () => {
     const hostname = form.hostname.trim();
     if (!hostname) return;
+    if (!hasRequiredHostAuthCredential({ host: effectiveAuthHost, keys: availableKeys, identities })) {
+      toast.error(t("hostDetails.auth.credentialRequired"));
+      return;
+    }
     const proxySave = prepareProxyConfigForSave({
       proxyConfig: form.proxyConfig,
       proxyProfileId: form.proxyProfileId,
@@ -465,6 +502,13 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
       notes: form.notes?.trim() || undefined,
       port: finalPort,
       password: form.savePassword === false ? undefined : form.password,
+      authMethod: resolveHostAuthMethodForPersistence({
+        host: form,
+        keys: availableKeys,
+        identities,
+        groupDefaults: effectiveGroupDefaults,
+      }),
+      authPolicyVersion: 1,
       managedSourceId: finalManagedSourceId,
     };
     cleaned = prepareTelnetCredentialsForSave(normalizePrimaryTelnetState(cleaned));
@@ -594,11 +638,6 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
     };
   }, [availableKeys]);
 
-  const selectedIdentity = useMemo(() => {
-    if (!form.identityId) return undefined;
-    return identities.find((i) => i.id === form.identityId);
-  }, [form.identityId, identities]);
-
   const selectedTelnetIdentity = useMemo(() => {
     if (!form.telnetIdentityId) return undefined;
     return identities.find((i) => i.id === form.telnetIdentityId);
@@ -655,9 +694,9 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
   );
 
   const clearIdentity = useCallback(() => {
-    setForm((prev) => ({ ...prev, identityId: undefined }));
+    setForm((prev) => detachEffectiveHostIdentity(prev, effectiveAuth.username));
     setIdentitySuggestionsOpen(false);
-  }, []);
+  }, [effectiveAuth.username]);
 
   const updateTelnetIdentity = useCallback((identityId: string) => {
     setForm((prev) => ({
@@ -820,6 +859,7 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
       onClose={onCancel}
       width="w-[420px]"
       layout={layout}
+      className={className}
       dataSection="host-details-panel"
       {...asideResizeProps}
       title={
@@ -904,8 +944,12 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
         <HostDetailsConnectionSections
           t={t}
           form={form}
+          setForm={setForm}
           update={update}
-          groupDefaults={groupDefaults}
+          groupDefaults={effectiveGroupDefaults}
+          effectiveAuthMethod={effectiveAuthMethod}
+          effectiveUsername={effectiveAuth.username}
+          effectiveIdentityId={effectiveAuthHost.identityId}
           selectedIdentity={selectedIdentity}
           clearIdentity={clearIdentity}
           identities={identities}
@@ -979,6 +1023,7 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
           hasEffectiveFontSizeOverride={hasEffectiveFontSizeOverride}
           sshAgentStatus={sshAgentStatus}
           effectiveGroupDefaults={effectiveGroupDefaults}
+          effectiveAuthMethod={effectiveAuthMethod}
           showAlgorithmOverrides={showAlgorithmOverrides}
           setShowAlgorithmOverrides={setShowAlgorithmOverrides}
           chainedHosts={chainedHosts}
@@ -1094,11 +1139,10 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
               </>
             )}
 
-            <Input
-              placeholder={groupDefaults?.charset || t("hostDetails.charset.placeholder")}
-              value={form.charset || "UTF-8"}
-              onChange={(e) => update("charset", e.target.value)}
-              className="h-10"
+            <TerminalEncodingSelect
+              value={form.charset}
+              inheritedValue={effectiveGroupDefaults?.charset}
+              onValueChange={(value) => update("charset", value)}
             />
 
             <button

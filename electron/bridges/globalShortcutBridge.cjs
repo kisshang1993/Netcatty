@@ -7,6 +7,9 @@ const path = require("node:path");
 const fs = require("node:fs");
 
 let electronModule = null;
+let ensureMainWindow = null;
+let sendWhenRendererReady = null;
+let getSystemMenuMainWindow = null;
 let tray = null;
 let closeToTray = false;
 let currentHotkey = null;
@@ -28,7 +31,8 @@ const STATUS_TEXT = {
 // Dynamic tray menu data (synced from renderer)
 let trayMenuData = {
   sessions: [],        // { id, label, hostLabel, status }
-  portForwardRules: [], // { id, label, type, localPort, remoteHost, remotePort, status, hostId }
+  portForwardRules: [], // { id, label, type, localPort, remoteHost, remotePort, status, hostId, canStop }
+  hosts: [],           // { id, label, hostname, group, pinned, lastConnectedAt }
 };
 
 let trayPanelWindow = null;
@@ -180,12 +184,85 @@ function openMainWindow() {
   bringMainWindowToForeground(getMainWindow());
 }
 
+function getTrackedMainWindow() {
+  if (typeof getSystemMenuMainWindow === "function") {
+    const win = getSystemMenuMainWindow();
+    if (win && !win.isDestroyed?.()) return win;
+  }
+  try {
+    const windowManager = require("./windowManager.cjs");
+    const tracked = windowManager.getMainWindow?.();
+    if (tracked && !tracked.isDestroyed?.()) return tracked;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+async function getOrCreateMainWindow() {
+  const tracked = getTrackedMainWindow();
+  if (tracked) {
+    return { win: tracked, created: false };
+  }
+  if (typeof ensureMainWindow === "function") {
+    const win = await ensureMainWindow();
+    return { win, created: true };
+  }
+  return { win: null, created: false };
+}
+
+async function openMainWindowReady() {
+  const { win } = await getOrCreateMainWindow();
+  bringMainWindowToForeground(win);
+  return win;
+}
+
+async function sendToMainWindow(channel, payload, { focus = true, createIfMissing = true } = {}) {
+  const { win } = createIfMissing
+    ? await getOrCreateMainWindow()
+    : { win: getTrackedMainWindow() };
+  if (!win) return false;
+  if (focus) {
+    bringMainWindowToForeground(win);
+  }
+  try {
+    if (typeof sendWhenRendererReady === "function") {
+      const result = await sendWhenRendererReady(win, channel, payload, { timeoutMs: 8000 });
+      if (!result?.success) {
+        console.warn(
+          `[GlobalShortcut] Failed to deliver ${channel} to main window:`,
+          result?.error || result?.reason || "unknown",
+        );
+      }
+      return result?.success === true;
+    }
+    win.webContents?.send(channel, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function connectToHostFromSystemMenu(hostId) {
+  if (!hostId) return;
+  await sendToMainWindow("netcatty:trayPanel:connectToHost", hostId);
+}
+
 function getTrayPanelUrl() {
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
     return `${devServerUrl.replace(/\/$/, "")}/#/tray`;
   }
   return "app://netcatty/index.html#/tray";
+}
+
+function pushTrayMenuDataToPanel() {
+  if (!trayPanelWindow || trayPanelWindow.isDestroyed()) return;
+  try {
+    trayPanelWindow.webContents?.send("netcatty:trayPanel:setMenuData", trayMenuData);
+  } catch {
+    // ignore
+  }
 }
 
 function ensureTrayPanelWindow() {
@@ -232,11 +309,7 @@ function ensureTrayPanelWindow() {
   void trayPanelWindow.loadURL(url);
 
   trayPanelWindow.webContents.on("did-finish-load", () => {
-    try {
-      trayPanelWindow?.webContents?.send("netcatty:trayPanel:setMenuData", trayMenuData);
-    } catch {
-      // ignore
-    }
+    pushTrayMenuDataToPanel();
   });
 
   return trayPanelWindow;
@@ -262,11 +335,7 @@ function showTrayPanel() {
   win.show();
   win.focus();
 
-  try {
-    win.webContents?.send("netcatty:trayPanel:setMenuData", trayMenuData);
-  } catch {
-    // ignore
-  }
+  pushTrayMenuDataToPanel();
 
   if (trayPanelRefreshTimer) clearInterval(trayPanelRefreshTimer);
   trayPanelRefreshTimer = setInterval(() => {
@@ -337,6 +406,10 @@ function resolveTrayIconPath() {
  */
 function init(deps) {
   electronModule = deps.electronModule;
+  ensureMainWindow = deps.ensureMainWindow || null;
+  sendWhenRendererReady = deps.sendWhenRendererReady || null;
+  getSystemMenuMainWindow = deps.getMainWindow || null;
+  updateDockMenu();
 }
 
 /**
@@ -667,12 +740,11 @@ function buildTrayMenuTemplate() {
       menuTemplate.push({
         label: `  ${session.hostLabel || session.label}  (${statusText})`,
         click: () => {
-          // Focus window and switch to this session
-          const win = getMainWindow();
-          if (win && bringMainWindowToForeground(win)) {
-            // Notify renderer to focus this session
-            win.webContents?.send("netcatty:tray:focusSession", session.id);
-          }
+          // AI silent sessions open a terminal popup from the renderer and must
+          // not be force-focused into a tab-less main-window surface.
+          void sendToMainWindow("netcatty:tray:focusSession", session.id, {
+            focus: session.aiHidden !== true,
+          });
         },
       });
     }
@@ -688,6 +760,7 @@ function buildTrayMenuTemplate() {
     for (const rule of trayMenuData.portForwardRules) {
       const isActive = rule.status === "active";
       const isConnecting = rule.status === "connecting";
+      const isStoppable = isActive || isConnecting || rule.canStop === true;
       const statusText =
         rule.status === "active"
           ? STATUS_TEXT.portForward.active
@@ -707,7 +780,7 @@ function buildTrayMenuTemplate() {
         click: () => {
           const win = getMainWindow();
           if (win) {
-            win.webContents?.send("netcatty:tray:togglePortForward", rule.id, !isActive);
+            win.webContents?.send("netcatty:tray:togglePortForward", rule.id, !isStoppable);
           }
         },
       });
@@ -725,6 +798,68 @@ function buildTrayMenuTemplate() {
   });
 
   return menuTemplate;
+}
+
+function getDockHostLabel(host) {
+  const label = typeof host?.label === "string" ? host.label.trim() : "";
+  if (label) return label;
+  const hostname = typeof host?.hostname === "string" ? host.hostname.trim() : "";
+  return hostname || "Untitled Host";
+}
+
+function getDockHostLastConnectedAt(host) {
+  const value = Number(host?.lastConnectedAt);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function getDockMenuHosts() {
+  return (Array.isArray(trayMenuData.hosts) ? trayMenuData.hosts : [])
+    .filter((host) => host && typeof host.id === "string" && host.id.length > 0)
+    .slice()
+    .sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+      const recentDiff = getDockHostLastConnectedAt(b) - getDockHostLastConnectedAt(a);
+      if (recentDiff !== 0) return recentDiff;
+      return getDockHostLabel(a).localeCompare(getDockHostLabel(b), undefined, { sensitivity: "base" });
+    });
+}
+
+function buildDockMenuTemplate() {
+  const hostItems = getDockMenuHosts().map((host) => ({
+    label: getDockHostLabel(host),
+    click: async () => {
+      await connectToHostFromSystemMenu(host.id);
+    },
+  }));
+
+  return [
+    {
+      label: "Open Main Window",
+      click: async () => {
+        await openMainWindowReady();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "New Connection",
+      enabled: hostItems.length > 0,
+      submenu: hostItems.length > 0
+        ? hostItems
+        : [{ label: "No Saved Hosts", enabled: false }],
+    },
+  ];
+}
+
+function updateDockMenu() {
+  if (!electronModule || process.platform !== "darwin") return;
+  const { Menu, app } = electronModule;
+  if (!Menu || !app?.dock?.setMenu) return;
+
+  try {
+    app.dock.setMenu(Menu.buildFromTemplate(buildDockMenuTemplate()));
+  } catch {
+    // ignore
+  }
 }
 
 /**
@@ -757,8 +892,13 @@ function setTrayMenuData(data) {
   if (data.portForwardRules !== undefined) {
     trayMenuData.portForwardRules = data.portForwardRules;
   }
+  if (data.hosts !== undefined) {
+    trayMenuData.hosts = data.hosts;
+  }
   // Rebuild menu with new data
   updateTrayMenu();
+  updateDockMenu();
+  pushTrayMenuDataToPanel();
 }
 
 /**
@@ -867,30 +1007,33 @@ function registerHandlers(ipcMain) {
   });
 
   ipcMain.handle("netcatty:trayPanel:openMainWindow", async () => {
-    openMainWindow();
+    await openMainWindowReady();
     return { success: true };
   });
 
   ipcMain.handle("netcatty:trayPanel:jumpToSession", async (_event, sessionId) => {
-    openMainWindow();
-    try {
-      const win = getMainWindow();
-      win?.webContents?.send("netcatty:trayPanel:jumpToSession", sessionId);
-    } catch {
-      // ignore
-    }
+    // Do not force-focus the main window here. Visible sessions open/focus it
+    // from the renderer; AI silent sessions open a terminal popup instead and
+    // should not steal focus into a tab-less main-window surface.
+    await sendToMainWindow("netcatty:trayPanel:jumpToSession", sessionId, {
+      focus: false,
+    });
     return { success: true };
   });
 
   ipcMain.handle("netcatty:trayPanel:connectToHost", async (_event, hostId) => {
-    openMainWindow();
-    try {
-      const win = getMainWindow();
-      win?.webContents?.send("netcatty:trayPanel:connectToHost", hostId);
-    } catch {
-      // ignore
-    }
+    await connectToHostFromSystemMenu(hostId);
     return { success: true };
+  });
+
+  ipcMain.handle("netcatty:trayPanel:closeSession", async (_event, sessionId) => {
+    const delivered = await sendToMainWindow("netcatty:trayPanel:closeSession", sessionId, {
+      focus: false,
+      createIfMissing: false,
+    });
+    return delivered
+      ? { success: true }
+      : { success: false, error: "Main window is not available" };
   });
 
   ipcMain.handle("netcatty:trayPanel:quitApp", async () => {
@@ -909,6 +1052,13 @@ function registerHandlers(ipcMain) {
 function cleanup() {
   unregisterGlobalHotkey();
   destroyTray();
+  if (electronModule?.app?.dock?.setMenu) {
+    try {
+      electronModule.app.dock.setMenu(null);
+    } catch {
+      // ignore
+    }
+  }
 
   if (trayPanelRefreshTimer) {
     clearInterval(trayPanelRefreshTimer);

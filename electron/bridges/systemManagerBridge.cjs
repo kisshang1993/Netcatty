@@ -16,7 +16,7 @@ const CAPABILITY_SCRIPT_POSIX = [
 const PROCESS_LIST_SCRIPT_POSIX = [
   "exec sh -c ",
   "'",
-  "ps -eo pid= -o ppid= -o user= -o stat= -o pcpu= -o pmem= -o rss= -o vsz= -o etime= -o args= 2>/dev/null",
+  "ps -eo pid= -o ppid= -o user= -o stat= -o pcpu= -o pmem= -o rss= -o vsz= -o etime= -o args= 2>/dev/null || top -b -n 1 2>/dev/null || ps ww 2>/dev/null || ps 2>/dev/null",
   "'",
 ].join("");
 const PROCESS_LIST_MAX_BUFFER = 64 * 1024 * 1024;
@@ -46,18 +46,60 @@ function parseProcessLines(stdout) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const m = trimmed.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
-    if (!m) continue;
+    if (m) {
+      processes.push({
+        pid: Number(m[1]),
+        ppid: Number(m[2]),
+        user: m[3],
+        stat: m[4],
+        cpuPercent: Number(m[5]),
+        memPercent: Number(m[6]),
+        rssKb: Number(m[7]),
+        vszKb: Number(m[8]),
+        elapsed: m[9],
+        command: m[10],
+      });
+      continue;
+    }
+
+    const busyBoxTopMatch = trimmed.match(
+      /^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+(?:\.\d+)?[mgtpezy]?)\s+([\d.]+)%?\s+(?:\d+\s+)?([\d.]+)%?\s+(.+)$/i,
+    );
+    if (busyBoxTopMatch) {
+      const suffix = busyBoxTopMatch[5].slice(-1).toLowerCase();
+      const multipliers = { m: 1024, g: 1024 ** 2, t: 1024 ** 3, p: 1024 ** 4, e: 1024 ** 5, z: 1024 ** 6, y: 1024 ** 7 };
+      const multiplier = multipliers[suffix] || 1;
+      processes.push({
+        pid: Number(busyBoxTopMatch[1]),
+        ppid: Number(busyBoxTopMatch[2]),
+        user: busyBoxTopMatch[3],
+        stat: busyBoxTopMatch[4],
+        cpuPercent: Number(busyBoxTopMatch[7]),
+        memPercent: Number(busyBoxTopMatch[6]),
+        rssKb: 0,
+        vszKb: Math.round(Number.parseFloat(busyBoxTopMatch[5]) * multiplier),
+        elapsed: "",
+        command: busyBoxTopMatch[8],
+      });
+      continue;
+    }
+
+    const busyBoxMatch = trimmed.match(/^(\d+)\s+(\S+)\s+(\d+(?:\.\d+)?[mgtpezy]?)\s+(\S+)\s+(.+)$/i);
+    if (!busyBoxMatch) continue;
+    const suffix = busyBoxMatch[3].slice(-1).toLowerCase();
+    const multipliers = { m: 1024, g: 1024 ** 2, t: 1024 ** 3, p: 1024 ** 4, e: 1024 ** 5, z: 1024 ** 6, y: 1024 ** 7 };
+    const multiplier = multipliers[suffix] || 1;
     processes.push({
-      pid: Number(m[1]),
-      ppid: Number(m[2]),
-      user: m[3],
-      stat: m[4],
-      cpuPercent: Number(m[5]),
-      memPercent: Number(m[6]),
-      rssKb: Number(m[7]),
-      vszKb: Number(m[8]),
-      elapsed: m[9],
-      command: m[10],
+      pid: Number(busyBoxMatch[1]),
+      ppid: 0,
+      user: busyBoxMatch[2],
+      stat: busyBoxMatch[4],
+      cpuPercent: 0,
+      memPercent: 0,
+      rssKb: 0,
+      vszKb: Math.round(Number.parseFloat(busyBoxMatch[3]) * multiplier),
+      elapsed: "",
+      command: busyBoxMatch[5],
     });
   }
   return processes;

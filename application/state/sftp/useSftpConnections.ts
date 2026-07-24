@@ -4,7 +4,7 @@ import { netcattyBridge } from "../../../infrastructure/services/netcattyBridge"
 import type { Host, Identity, KnownHost, SftpConnection, SftpFileEntry, SftpFilenameEncoding, SSHKey } from "../../../domain/models";
 import type { SftpHostKeyInfo, SftpHostKeyVerificationState, SftpPane } from "./types";
 import { useSftpDirectoryListing } from "./useSftpDirectoryListing";
-import { useSftpHostCredentials } from "./useSftpHostCredentials";
+import { buildSftpReuseCredentials, useSftpHostCredentials } from "./useSftpHostCredentials";
 import { buildCacheKey, getSharedRemoteHostCache, setSharedRemoteHostCache } from "./sharedRemoteHostCache";
 import { resolveRemoteSftpStartState } from "./sftpConnectStartPath";
 
@@ -43,6 +43,33 @@ export interface SftpConnectOptions {
   initialPath?: string;
   onTabCreated?: (tabId: string) => void;
   sourceSessionId?: string;
+}
+
+type SftpOpenBridge = Pick<NetcattyBridge, "openSftp"> &
+  Partial<Pick<NetcattyBridge, "openSftpForSession">>;
+
+interface OpenSftpWithSessionPreferenceParams {
+  bridge: SftpOpenBridge | null | undefined;
+  sourceSessionId?: string;
+  openOptions: NetcattySSHOptions;
+}
+
+/** Open SFTP through an already-authenticated terminal session before retrying normal auth. */
+export async function openSftpWithSessionPreference({
+  bridge,
+  sourceSessionId,
+  openOptions,
+}: OpenSftpWithSessionPreferenceParams): Promise<string> {
+  if (!bridge?.openSftp) throw new Error("SFTP bridge unavailable");
+  if (sourceSessionId && bridge.openSftpForSession) {
+    try {
+      return await bridge.openSftpForSession(sourceSessionId);
+    } catch {
+      // Fall through to the existing SFTP open path so users still get a usable
+      // file browser when the live SSH transport cannot provide an SFTP channel.
+    }
+  }
+  return bridge.openSftp(openOptions);
 }
 
 interface UseSftpConnectionsResult {
@@ -205,7 +232,43 @@ export const useSftpConnections = ({
 
       if (!activeTabId) return;
 
+      // Capture path/endpoint before we replace the connection so same-endpoint
+      // auto-reconnect can land back where the user was browsing instead of home.
+      // Do not inherit path across endpoints (including same hostId with different
+      // hostname/port/user) if a reconnect flag is still set while switching.
+      const previousConnection = getActivePane(side)?.connection;
+      const previousPath = previousConnection?.currentPath;
+      const previousConnectionKey = !previousConnection
+        ? null
+        : previousConnection.isLocal
+          ? "local"
+          : (connectionCacheKeyMapRef.current.get(previousConnection.id) ?? null);
+      const targetConnectionKey = host === "local"
+        ? "local"
+        : buildCacheKey(
+          host.id,
+          host.hostname,
+          host.port,
+          host.protocol,
+          host.sftpSudo,
+          host.username,
+          host.sftpFileProtocol,
+        );
+      if (
+        reconnectingRef.current[side]
+        && previousConnectionKey
+        && previousConnectionKey !== targetConnectionKey
+      ) {
+        reconnectingRef.current[side] = false;
+      }
       const isReconnectAttempt = reconnectingRef.current[side];
+      const sameEndpointReconnect =
+        isReconnectAttempt
+        && !!previousPath
+        && previousConnectionKey === targetConnectionKey;
+      const effectiveInitialPath =
+        options?.initialPath
+        ?? (sameEndpointReconnect ? previousPath : undefined);
 
       // Notify caller of the tab ID synchronously, before any async work.
       // This allows callers to map metadata (e.g. connection keys) to the tab
@@ -250,7 +313,7 @@ export const useSftpConnections = ({
       if (host !== "local") {
         connectionCacheKeyMapRef.current.set(
           connectionId,
-          buildCacheKey(host.id, host.hostname, host.port, host.protocol, host.sftpSudo, host.username),
+          buildCacheKey(host.id, host.hostname, host.port, host.protocol, host.sftpSudo, host.username, host.sftpFileProtocol),
         );
       }
 
@@ -289,7 +352,7 @@ export const useSftpConnections = ({
           homeDir = isWindows ? "C:\\Users\\damao" : "/Users/damao";
         }
 
-        const startPath = options?.initialPath || homeDir;
+        const startPath = effectiveInitialPath || homeDir;
 
         const connection: SftpConnection = {
           id: connectionId,
@@ -336,14 +399,14 @@ export const useSftpConnections = ({
           }));
         }
       } else {
-        const hostCacheKey = buildCacheKey(host.id, host.hostname, host.port, host.protocol, host.sftpSudo, host.username);
+        const hostCacheKey = buildCacheKey(host.id, host.hostname, host.port, host.protocol, host.sftpSudo, host.username, host.sftpFileProtocol);
         const sharedHostCacheCandidate = options?.ignoreSharedCache
           ? null
           : getSharedRemoteHostCache(hostCacheKey);
         const { initialPath, sharedHostCache, cachedStartPath } = resolveRemoteSftpStartState({
           filenameEncoding,
           ignoreSharedCache: options?.ignoreSharedCache,
-          initialPath: options?.initialPath,
+          initialPath: effectiveInitialPath,
           sharedHostCacheCandidate,
         });
 
@@ -359,6 +422,7 @@ export const useSftpConnections = ({
           // non-interactive (loading=true) with stale cached files visible —
           // no worse than the previous UX of always showing a spinner.
           reusedConnection: !!options?.sourceSessionId,
+          fileProtocol: host.sftpFileProtocol ?? 'auto',
         };
 
         updateTab(side, activeTabId, (prev) => ({
@@ -421,7 +485,6 @@ export const useSftpConnections = ({
         }
 
         try {
-          const credentials = getHostCredentials(host);
           const openSftp = bridge?.openSftp;
           if (!openSftp) throw new Error("SFTP bridge unavailable");
 
@@ -436,47 +499,73 @@ export const useSftpConnections = ({
             );
           };
 
-          const hasKey = !!credentials.privateKey || !!credentials.identityFilePaths?.length;
-          const hasPassword = !!credentials.password;
-
+          let credentials: NetcattySSHOptions | null = null;
           let sftpId: string | undefined;
-          if (hasKey) {
+
+          // Live Connected rows: try reuse with endpoint-only options first so
+          // missing/undecryptable vault credentials do not block an already-
+          // authenticated terminal session. Fall back to full credentials if
+          // reuse fails (bridge may also fall through to a fresh connect).
+          if (options?.sourceSessionId && !host.sftpSudo) {
+            const reuseCredentials = buildSftpReuseCredentials(host, options.sourceSessionId);
             try {
-              const keyFirstCredentials = {
-                sessionId: sftpSessionId,
-                ...credentials,
-                sourceSessionId: options?.sourceSessionId,
-              };
-              if (!credentials.sudo) {
-                keyFirstCredentials.password = undefined;
-              }
-              sftpId = await openSftp(keyFirstCredentials);
-            } catch (err) {
-              if (hasPassword && isAuthError(err)) {
-                sftpId = await openSftp({
+              sftpId = await openSftpWithSessionPreference({
+                bridge,
+                sourceSessionId: options.sourceSessionId,
+                openOptions: {
+                  sessionId: sftpSessionId,
+                  ...reuseCredentials,
+                },
+              });
+              credentials = reuseCredentials;
+            } catch {
+              sftpId = undefined;
+            }
+          }
+
+          if (!sftpId) {
+            credentials = getHostCredentials(host);
+            const hasKey = !!credentials.privateKey || !!credentials.identityFilePaths?.length;
+            const hasPassword = !!credentials.password;
+
+            if (hasKey) {
+              try {
+                const keyFirstCredentials = {
                   sessionId: sftpSessionId,
                   ...credentials,
                   sourceSessionId: options?.sourceSessionId,
-                  privateKey: undefined,
-                  certificate: undefined,
-                  publicKey: undefined,
-                  keyId: undefined,
-                  keySource: undefined,
-                  identityFilePaths: undefined,
-                });
-              } else {
-                throw err;
+                };
+                if (!credentials.sudo) {
+                  keyFirstCredentials.password = undefined;
+                }
+                sftpId = await openSftp(keyFirstCredentials);
+              } catch (err) {
+                if (hasPassword && isAuthError(err)) {
+                  sftpId = await openSftp({
+                    sessionId: sftpSessionId,
+                    ...credentials,
+                    sourceSessionId: options?.sourceSessionId,
+                    privateKey: undefined,
+                    certificate: undefined,
+                    publicKey: undefined,
+                    keyId: undefined,
+                    keySource: undefined,
+                    identityFilePaths: undefined,
+                  });
+                } else {
+                  throw err;
+                }
               }
+            } else {
+              sftpId = await openSftp({
+                sessionId: sftpSessionId,
+                ...credentials,
+                sourceSessionId: options?.sourceSessionId,
+              });
             }
-          } else {
-            sftpId = await openSftp({
-              sessionId: sftpSessionId,
-              ...credentials,
-              sourceSessionId: options?.sourceSessionId,
-            });
           }
 
-          if (!sftpId) throw new Error("Failed to open SFTP session");
+          if (!sftpId || !credentials) throw new Error("Failed to open SFTP session");
 
           sftpSessionsRef.current.set(connectionId, sftpId);
           if (!isTargetConnectionCurrent()) {
@@ -494,7 +583,7 @@ export const useSftpConnections = ({
 
             if (bridge?.getSftpHomeDir) {
               try {
-                const result = await bridge.getSftpHomeDir(sftpId);
+                const result = await bridge.getSftpHomeDir(sftpId, host.sftpEncoding);
                 if (result?.success && result.homeDir) {
                   startPath = result.homeDir;
                   homeDir = result.homeDir;
@@ -571,8 +660,9 @@ export const useSftpConnections = ({
               dirCacheRef.current.delete(provisionalCacheKey);
             }
             // Fall back to homeDir, then "/", chaining attempts.
+            // Remembered/reconnect paths can be stale even when shared cache is gone.
             let fallbackSucceeded = false;
-            if (sharedHostCache && startPath !== homeDir) {
+            if (startPath !== homeDir) {
               try {
                 startPath = homeDir;
                 files = await listRemoteFiles(sftpId, startPath, filenameEncoding);

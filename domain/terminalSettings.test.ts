@@ -9,6 +9,52 @@ test("normalizeTerminalSettings disables prompt line breaks by default", () => {
   assert.equal(settings.forcePromptNewLine, false);
 });
 
+test("normalizeTerminalSettings defaults password prompt assist to hint", () => {
+  assert.equal(normalizeTerminalSettings().passwordPromptAssist, "hint");
+});
+
+test("normalizeTerminalSettings preserves password prompt assist modes", () => {
+  assert.equal(normalizeTerminalSettings({ passwordPromptAssist: "off" }).passwordPromptAssist, "off");
+  assert.equal(normalizeTerminalSettings({ passwordPromptAssist: "hint" }).passwordPromptAssist, "hint");
+  assert.equal(normalizeTerminalSettings({ passwordPromptAssist: "picker" }).passwordPromptAssist, "picker");
+});
+
+test("normalizeTerminalSettings falls back for unsupported password prompt assist modes", () => {
+  assert.equal(
+    normalizeTerminalSettings({ passwordPromptAssist: "legacy" as never }).passwordPromptAssist,
+    "hint",
+  );
+});
+
+test("normalizeTerminalSettings enables Shift+Enter newline by default", () => {
+  const settings = normalizeTerminalSettings();
+
+  assert.equal(settings.shiftEnterNewlineEnabled, true);
+  assert.equal(settings.shiftEnterNewlineText, "\\n");
+});
+
+test("normalizeTerminalSettings disables Kitty keyboard protocol by default", () => {
+  assert.equal(normalizeTerminalSettings().kittyKeyboardProtocolEnabled, false);
+  assert.equal(
+    normalizeTerminalSettings({ kittyKeyboardProtocolEnabled: true }).kittyKeyboardProtocolEnabled,
+    true,
+  );
+});
+
+test("normalizeTerminalSettings preserves Shift+Enter text", () => {
+  assert.equal(
+    normalizeTerminalSettings({ shiftEnterNewlineText: " \\\\\\n" }).shiftEnterNewlineText,
+    " \\\\\\n",
+  );
+});
+
+test("normalizeTerminalSettings falls back when Shift+Enter text is not a string", () => {
+  assert.equal(
+    normalizeTerminalSettings({ shiftEnterNewlineText: null as never }).shiftEnterNewlineText,
+    "\\n",
+  );
+});
+
 test("normalizeTerminalSettings defaults startupCommandDelayMs to 600", () => {
   assert.equal(normalizeTerminalSettings().startupCommandDelayMs, 600);
 });
@@ -32,6 +78,31 @@ test("normalizeTerminalSettings falls back for unsupported dynamic tab title mod
 
 test("normalizeTerminalSettings enables font smoothing by default", () => {
   assert.equal(normalizeTerminalSettings().fontSmoothing, true);
+});
+
+test("normalizeTerminalSettings enables terminal auto-close by default", () => {
+  assert.equal(normalizeTerminalSettings().autoCloseOnExit, true);
+});
+
+test("normalizeTerminalSettings preserves disabled terminal auto-close", () => {
+  assert.equal(normalizeTerminalSettings({ autoCloseOnExit: false }).autoCloseOnExit, false);
+});
+
+test("normalizeTerminalSettings disables SSH auto reconnect by default", () => {
+  assert.equal(normalizeTerminalSettings().sshAutoReconnectEnabled, false);
+});
+
+test("normalizeTerminalSettings preserves explicit SSH auto reconnect settings", () => {
+  assert.equal(normalizeTerminalSettings({ sshAutoReconnectEnabled: true }).sshAutoReconnectEnabled, true);
+  assert.equal(normalizeTerminalSettings({ sshAutoReconnectEnabled: false }).sshAutoReconnectEnabled, false);
+});
+
+test("normalizeTerminalSettings shows the host information bar by default", () => {
+  assert.equal(normalizeTerminalSettings().showHostInfoBar, true);
+});
+
+test("normalizeTerminalSettings preserves a hidden host information bar", () => {
+  assert.equal(normalizeTerminalSettings({ showHostInfoBar: false }).showHostInfoBar, false);
 });
 
 test("normalizeTerminalSettings disables hibernate for hidden tabs by default", () => {
@@ -69,6 +140,28 @@ test("normalizeTerminalSettings defaults middle-click behavior to paste", () => 
 
   assert.equal(settings.middleClickBehavior, "paste");
   assert.equal(settings.middleClickPaste, true);
+});
+
+test("normalizeTerminalSettings enables normalizeTextOnCopy by default", () => {
+  assert.equal(normalizeTerminalSettings().normalizeTextOnCopy, true);
+  assert.equal(normalizeTerminalSettings({ normalizeTextOnCopy: false }).normalizeTextOnCopy, false);
+});
+
+test("normalizeTerminalSettings defaults word separators to xterm-compatible boundaries", () => {
+  assert.equal(normalizeTerminalSettings().wordSeparators, " ()[]{}'\"");
+});
+
+test("normalizeTerminalSettings preserves custom word separators", () => {
+  const custom = " ()[]{}'\"=,:";
+
+  assert.equal(normalizeTerminalSettings({ wordSeparators: custom }).wordSeparators, custom);
+});
+
+test("normalizeTerminalSettings falls back when word separators are not a string", () => {
+  assert.equal(
+    normalizeTerminalSettings({ wordSeparators: null as never }).wordSeparators,
+    " ()[]{}'\"",
+  );
 });
 
 test("normalizeTerminalSettings migrates disabled legacy middle-click paste", () => {

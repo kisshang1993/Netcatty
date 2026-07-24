@@ -14,6 +14,15 @@ export type MiddleClickBehavior = 'context-menu' | 'paste' | 'disabled';
 export type LinkModifier = 'none' | 'ctrl' | 'alt' | 'meta';
 export type TerminalEmulationType = 'xterm-256color' | 'xterm-16color' | 'xterm';
 export type DynamicTabTitleMode = 'off' | 'agent' | 'all';
+/**
+ * How to assist when a sudo/su password prompt appears (#2156).
+ * - off: no assist
+ * - hint: ghost "press Enter" fill of the host session password
+ * - picker: WindTerm-like list of host + keychain password identities
+ */
+export type PasswordPromptAssistMode = 'off' | 'hint' | 'picker';
+
+export const DEFAULT_TERMINAL_WORD_SEPARATORS = ' ()[]{}\'"';
 
 // Keyword highlighting configuration
 export interface KeywordHighlightRule {
@@ -54,6 +63,9 @@ export interface TerminalSettings {
   // Keyboard
   altAsMeta: boolean; // Use ⌥ as the Meta key
   optionArrowWordJump: boolean; // macOS: Option+←/→ send Meta-b/f for word jump
+  shiftEnterNewlineEnabled: boolean; // Send configured text on Shift+Enter
+  shiftEnterNewlineText: string; // Backslash-escaped text sent by Shift+Enter
+  kittyKeyboardProtocolEnabled: boolean; // Enable Kitty keyboard protocol support
   scrollOnInput: boolean; // Scroll terminal to bottom on input
   scrollOnOutput: boolean; // Scroll terminal to bottom on output
   scrollOnKeyPress: boolean; // Scroll terminal to bottom on key press
@@ -65,9 +77,16 @@ export interface TerminalSettings {
   rightClickBehavior: RightClickBehavior;
   middleClickBehavior: MiddleClickBehavior;
   copyOnSelect: boolean; // Automatically copy selected text
+  /**
+   * When true, terminal copy paths strip display-padding spaces and join
+   * soft-wrapped rows before writing the clipboard. When false, use raw
+   * xterm getSelection() (screen-cell layout as-is).
+   */
+  normalizeTextOnCopy: boolean;
   middleClickPaste: boolean; // Legacy mirror for older settings payloads
   wordSeparators: string; // Characters for word selection
   linkModifier: LinkModifier; // Modifier key to click links
+  autoCloseOnExit: boolean; // Automatically close terminal UI after eligible session exits
 
   // Keyword Highlighting
   keywordHighlightEnabled: boolean;
@@ -82,6 +101,7 @@ export interface TerminalSettings {
   verifyHostKeys: boolean; // Verify SSH host keys before authenticating
   keepaliveInterval: number; // Seconds between SSH-level keepalive packets (0 = disabled)
   keepaliveCountMax: number; // Unanswered keepalives before declaring the connection dead
+  sshAutoReconnectEnabled: boolean; // Automatically reconnect SSH sessions after unexpected disconnects
   x11Display: string; // Optional local X11 DISPLAY override (empty = use system DISPLAY/default)
 
   // Mosh Connection
@@ -90,6 +110,7 @@ export interface TerminalSettings {
   moshClientPath: string;
 
   // Server Stats Display (Linux only)
+  showHostInfoBar: boolean; // Show host identity and server stats above the terminal
   showServerStats: boolean; // Show CPU/Memory/Disk in terminal statusbar
   serverStatsRefreshInterval: number; // Seconds between stats refresh (default: 30)
 
@@ -148,6 +169,12 @@ export interface TerminalSettings {
   autocompleteDebounceMs: number; // Debounce delay for fetching suggestions (ms)
   autocompleteMinChars: number; // Minimum characters before showing suggestions
   autocompleteMaxSuggestions: number; // Maximum suggestions in popup menu
+
+  /**
+   * Assist for sudo/su password prompts: off, quick Enter-to-paste (hint),
+   * or multi-credential picker. Default hint preserves historical sudo UX.
+   */
+  passwordPromptAssist: PasswordPromptAssistMode;
 }
 
 const STRICT_IPV4_OCTET_PATTERN = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
@@ -270,18 +297,35 @@ const isDynamicTabTitleMode = (value: unknown): value is DynamicTabTitleMode => 
   value === 'all'
 );
 
+const isPasswordPromptAssistMode = (value: unknown): value is PasswordPromptAssistMode => (
+  value === 'off' ||
+  value === 'hint' ||
+  value === 'picker'
+);
+
 export const normalizeTerminalSettings = (
   settings?: Partial<TerminalSettings> | null,
 ): TerminalSettings => {
   const middleClickBehavior = resolveMiddleClickBehavior(settings);
+  const wordSeparators = typeof settings?.wordSeparators === 'string'
+    ? settings.wordSeparators
+    : DEFAULT_TERMINAL_SETTINGS.wordSeparators;
+  const shiftEnterNewlineText = typeof settings?.shiftEnterNewlineText === 'string'
+    ? settings.shiftEnterNewlineText
+    : DEFAULT_TERMINAL_SETTINGS.shiftEnterNewlineText;
   const mergedSettings = {
     ...DEFAULT_TERMINAL_SETTINGS,
     ...(settings ?? {}),
     middleClickBehavior,
     middleClickPaste: middleClickBehavior === 'paste',
+    wordSeparators,
+    shiftEnterNewlineText,
     dynamicTabTitleMode: isDynamicTabTitleMode(settings?.dynamicTabTitleMode)
       ? settings.dynamicTabTitleMode
       : DEFAULT_TERMINAL_SETTINGS.dynamicTabTitleMode,
+    passwordPromptAssist: isPasswordPromptAssistMode(settings?.passwordPromptAssist)
+      ? settings.passwordPromptAssist
+      : DEFAULT_TERMINAL_SETTINGS.passwordPromptAssist,
   };
 
   // Migrate legacy 'canvas' renderer to 'dom' (canvas removed in xterm.js 6.0)
@@ -326,6 +370,9 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   minimumContrastRatio: 1,
   altAsMeta: false,
   optionArrowWordJump: false,
+  shiftEnterNewlineEnabled: true,
+  shiftEnterNewlineText: '\\n',
+  kittyKeyboardProtocolEnabled: false,
   scrollOnInput: true,
   scrollOnOutput: false,
   scrollOnKeyPress: false,
@@ -334,9 +381,11 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   rightClickBehavior: 'context-menu',
   middleClickBehavior: 'paste',
   copyOnSelect: false,
+  normalizeTextOnCopy: true, // Clean soft wraps + padding on copy (opt-out available)
   middleClickPaste: true,
-  wordSeparators: ' ()[]{}\'"',
+  wordSeparators: DEFAULT_TERMINAL_WORD_SEPARATORS,
   linkModifier: 'none',
+  autoCloseOnExit: true,
   keywordHighlightEnabled: true,
   keywordHighlightRules: DEFAULT_KEYWORD_HIGHLIGHT_RULES,
   localShell: '', // Empty = use system default
@@ -350,8 +399,10 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   verifyHostKeys: true,
   keepaliveInterval: 30,
   keepaliveCountMax: 10,
+  sshAutoReconnectEnabled: false,
   x11Display: '', // Empty = use DISPLAY/default local X server
   moshClientPath: '', // Legacy mosh-client override; normal UI uses bundled mosh-client
+  showHostInfoBar: true, // Preserve the existing host information bar by default
   showServerStats: true, // Show server stats by default
   serverStatsRefreshInterval: 5, // Refresh every 5 seconds
   systemManagerProcessRefreshInterval: 3,
@@ -378,6 +429,7 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   autocompleteDebounceMs: 100, // 100ms debounce
   autocompleteMinChars: 1, // Start suggesting after 1 character
   autocompleteMaxSuggestions: 8, // Show up to 8 suggestions
+  passwordPromptAssist: 'hint', // Historical sudo confirm-to-fill; picker is opt-in (#2156)
 };
 
 export interface TerminalTheme {
@@ -437,6 +489,7 @@ export interface TerminalSession {
   localShellArgs?: string[]; // Shell args for local terminals (from discovery)
   localShellName?: string;   // Display name for local shell (e.g., "Zsh", "Ubuntu (WSL)")
   localShellIcon?: string;   // Icon identifier for local shell (e.g., "zsh", "ubuntu")
+  localStartDir?: string;    // Per-session starting directory for local terminals
   // For sessions created from an existing SSH session: the id of the source
   // session whose already-authenticated connection should be reused so the new
   // shell channel does not trigger a second MFA prompt (issue #1204). The
@@ -455,6 +508,23 @@ export interface TerminalSession {
   codingCliProviderId?: CodingCliProviderId;
   /** Runtime marker for sessions reconstructed from startup restore. */
   restoreState?: 'restored-disconnected';
+  /**
+   * Runtime marker for sessions backed by an in-memory-only host (e.g. a
+   * password deep link). Excluded from session restore persistence because
+   * the one-time credentials cannot survive a relaunch.
+   */
+  ephemeralHost?: boolean;
+  /**
+   * Runtime marker for sessions opened via MCP host_open while "silent
+   * sessions" is enabled. Hidden from the main window's tab bar (TopTabs,
+   * QuickSwitcher, orphan tab ordering) and excluded from session-restore
+   * persistence, but remains a fully live session reachable by terminal
+   * exec/sftp/session-close tools, and still visible in TrayPanel and the
+   * external MCP session list.
+   */
+  hiddenFromTabs?: boolean;
+  /** Runtime hint to auto-open a side panel once the session connects. */
+  autoOpenSidePanel?: 'sftp';
   /** Latest known working directory captured from terminal cwd tracking. */
   lastCwd?: string;
 }

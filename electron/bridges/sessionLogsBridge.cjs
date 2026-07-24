@@ -14,6 +14,7 @@ const {
 const FILE_NAME_UNSAFE_CHARS = new Set(["<", ">", ":", "\"", "/", "\\", "|", "?", "*"]);
 const WINDOWS_RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$/i;
 const manualSessionLogTokens = new Map();
+const SESSION_LOG_FORMATS = new Set(["txt", "raw", "html"]);
 
 function isControlCharacter(char) {
   const code = char.codePointAt(0);
@@ -266,15 +267,17 @@ async function startManualSessionLog(event, payload = {}) {
   const targetDirectory = typeof preferredDirectory === "string" && preferredDirectory.trim()
     ? preferredDirectory.trim()
     : require("node:os").homedir();
-  const safeSessionName = safePathSegment(sessionName || sessionId, "session");
-  const defaultPath = path.join(targetDirectory, `${safeSessionName}_${toLocalISOString(new Date())}.log`);
+  const format = SESSION_LOG_FORMATS.has(payload.format) ? payload.format : "raw";
+  const extension = format === "raw" ? "log" : format;
+  const displaySessionName = sessionName || sessionId;
+  const safeSessionName = safePathSegment(displaySessionName, "session");
+  const defaultPath = path.join(targetDirectory, `${safeSessionName}_${toLocalISOString(new Date())}.${extension}`);
 
   try {
     const result = await dialog.showSaveDialog({
       defaultPath,
       filters: [
-        { name: "Log Files", extensions: ["log"] },
-        { name: "Text Files", extensions: ["txt"] },
+        { name: format === "txt" ? "Text Files" : format === "html" ? "HTML Files" : "Log Files", extensions: [extension] },
         { name: "All Files", extensions: ["*"] },
       ],
     });
@@ -283,15 +286,19 @@ async function startManualSessionLog(event, payload = {}) {
       return { success: true, started: false, canceled: true };
     }
 
-    const filePath = path.extname(result.filePath)
-      ? result.filePath
-      : `${result.filePath}.log`;
+    const filePath = normalizeManualSessionLogFilePath(result.filePath, extension);
+    if (filePath !== result.filePath && !(await confirmManualSessionLogOverwrite(filePath))) {
+      return { success: true, started: false, canceled: true };
+    }
+
     const startResult = sessionLogStreamManager.startStreamToFile(sessionId, {
       filePath,
-      format: "txt",
-      hostLabel: safeSessionName,
+      format,
+      hostLabel: displaySessionName,
       startTime: Date.now(),
+      timestampsEnabled: Boolean(payload.timestampsEnabled),
       initialLine: typeof initialLine === "string" ? initialLine : "",
+      separateInitialLineBeforeLeadingCarriageReturn: true,
       stopRequiresToken: true,
     });
 
@@ -304,6 +311,32 @@ async function startManualSessionLog(event, payload = {}) {
   } catch (err) {
     return { success: false, started: false, error: err?.message || String(err) };
   }
+}
+
+function normalizeManualSessionLogFilePath(filePath, extension = "log") {
+  return path.extname(filePath).toLowerCase() === `.${extension}` ? filePath : `${filePath}.${extension}`;
+}
+
+async function confirmManualSessionLogOverwrite(filePath) {
+  try {
+    await fs.promises.access(filePath, fs.constants.F_OK);
+  } catch (err) {
+    if (err?.code === "ENOENT") return true;
+    throw err;
+  }
+
+  const result = await dialog.showMessageBox({
+    type: "warning",
+    buttons: ["Overwrite", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: "Overwrite session log?",
+    message: `"${path.basename(filePath)}" already exists.`,
+    detail: "Choose Overwrite to replace it, or Cancel to keep the existing file.",
+  });
+
+  return result.response === 0;
 }
 
 async function stopManualSessionLog(event, payload = {}) {
@@ -323,6 +356,7 @@ async function stopManualSessionLog(event, payload = {}) {
     if (!filePath) {
       if (!sessionLogStreamManager.hasStream(sessionId)) {
         manualSessionLogTokens.delete(sessionId);
+        return { success: false, stopped: true, error: "Failed to finalize session log" };
       }
       return { success: true, stopped: false };
     }
@@ -345,7 +379,7 @@ async function getManualSessionLogStatus(event, payload = {}) {
 /**
  * Register IPC handlers for session logs operations
  */
-function registerHandlers(ipcMain) {
+function registerHandlers(ipcMain, options = {}) {
   ipcMain.handle("netcatty:sessionLogs:export", exportSessionLog);
   ipcMain.handle("netcatty:sessionLogs:selectDir", selectSessionLogsDir);
   ipcMain.handle("netcatty:sessionLogs:autoSave", autoSaveSessionLog);
@@ -353,6 +387,20 @@ function registerHandlers(ipcMain) {
   ipcMain.handle("netcatty:sessionLog:manualStart", startManualSessionLog);
   ipcMain.handle("netcatty:sessionLog:manualStop", stopManualSessionLog);
   ipcMain.handle("netcatty:sessionLog:manualStatus", getManualSessionLogStatus);
+
+  // In the default terminal-worker runtime, sessions run in a utilityProcess
+  // and call appendData() on the worker's own sessionLogStreamManager module
+  // instance. Manual session logs (and script session logs) are started in
+  // the *main* process, so without this tap their streams never receive any
+  // terminal output — the saved file would only contain the initial prompt
+  // line captured from the renderer buffer (issue #1938). The worker already
+  // mirrors every output chunk to the main process for script output buffers;
+  // feed that same stream into the main-process log streams. appendData() is
+  // a no-op for sessions without an active main-process stream.
+  options.terminalWorkerManager?.addOutputTap?.((sessionId, data) => {
+    if (typeof data !== "string" || data.length === 0) return;
+    require("./sessionLogStreamManager.cjs").appendData(sessionId, data);
+  });
 }
 
 module.exports = {

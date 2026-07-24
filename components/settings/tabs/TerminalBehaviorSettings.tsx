@@ -1,4 +1,5 @@
 import React from "react";
+import { DEFAULT_TERMINAL_WORD_SEPARATORS } from "../../../domain/models";
 import type { DynamicTabTitleMode, LinkModifier, MiddleClickBehavior, RightClickBehavior, TerminalSettings } from "../../../domain/models";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
@@ -39,6 +40,16 @@ export const TerminalBehaviorSettings: React.FC<TerminalBehaviorSettingsProps> =
       <SectionHeader title={t("settings.terminal.section.behavior")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          label={t("settings.terminal.behavior.autoCloseOnExit")}
+          description={t("settings.terminal.behavior.autoCloseOnExit.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.autoCloseOnExit}
+            onChange={(v) => updateTerminalSetting("autoCloseOnExit", v)}
+          />
+        </SettingRow>
+
+        <SettingRow
           label={t("settings.terminal.behavior.rightClick")}
           description={t("settings.terminal.behavior.rightClick.desc")}
         >
@@ -62,6 +73,16 @@ export const TerminalBehaviorSettings: React.FC<TerminalBehaviorSettingsProps> =
         </SettingRow>
 
         <SettingRow
+          label={t("settings.terminal.behavior.normalizeTextOnCopy")}
+          description={t("settings.terminal.behavior.normalizeTextOnCopy.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.normalizeTextOnCopy ?? true}
+            onChange={(v) => updateTerminalSetting("normalizeTextOnCopy", v)}
+          />
+        </SettingRow>
+
+        <SettingRow
           label={t("settings.terminal.behavior.middleClick")}
           description={t("settings.terminal.behavior.middleClick.desc")}
         >
@@ -77,10 +98,43 @@ export const TerminalBehaviorSettings: React.FC<TerminalBehaviorSettingsProps> =
         </SettingRow>
 
         <SettingRow
+          label={t("settings.terminal.behavior.wordSeparators")}
+          description={t("settings.terminal.behavior.wordSeparators.desc")}
+        >
+          <Input
+            value={terminalSettings.wordSeparators}
+            onChange={(e) => updateTerminalSetting("wordSeparators", e.target.value)}
+            placeholder={`${DEFAULT_TERMINAL_WORD_SEPARATORS}=,:`}
+            className="w-56 font-mono"
+            spellCheck={false}
+          />
+        </SettingRow>
+
+        <SettingRow
           label={t("settings.terminal.behavior.bracketedPaste")}
           description={t("settings.terminal.behavior.bracketedPaste.desc")}
         >
           <Toggle checked={!terminalSettings.disableBracketedPaste} onChange={(v) => updateTerminalSetting("disableBracketedPaste", !v)} />
+        </SettingRow>
+
+        <SettingRow
+          label={t("settings.terminal.behavior.shiftEnterNewline")}
+          description={t("settings.terminal.behavior.shiftEnterNewline.desc")}
+        >
+          <Toggle checked={terminalSettings.shiftEnterNewlineEnabled ?? true} onChange={(v) => updateTerminalSetting("shiftEnterNewlineEnabled", v)} />
+        </SettingRow>
+
+        <SettingRow
+          label={t("settings.terminal.behavior.shiftEnterNewlineText")}
+          description={t("settings.terminal.behavior.shiftEnterNewlineText.desc")}
+        >
+          <Input
+            value={terminalSettings.shiftEnterNewlineText ?? "\\n"}
+            onChange={(e) => updateTerminalSetting("shiftEnterNewlineText", e.target.value)}
+            placeholder="\\n"
+            className="w-56 font-mono"
+            spellCheck={false}
+          />
         </SettingRow>
 
         <SettingRow

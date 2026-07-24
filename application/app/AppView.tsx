@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { Suspense, lazy, useCallback, useMemo } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo } from 'react';
 import { AlertTriangle, Download, Trash2 } from 'lucide-react';
-import { activeTabStore, toEditorTabId, useIsEditorTabActive } from '../state/activeTabStore';
+import { activeTabStore, toEditorTabId, useActiveTabId, useIsEditorTabActive } from '../state/activeTabStore';
 import { editorTabStore } from '../state/editorTabStore';
 import { releaseEditorTabSaveCoordinator, saveEditorTab } from '../state/editorTabSave';
 import { useTerminalHostTreeLayoutWidth } from '../state/terminalHostTreeStore';
@@ -21,9 +21,19 @@ import { Label } from '../../components/ui/label';
 import { LazyLoadBoundary } from '../../components/ui/lazy-load-boundary';
 import { toast } from '../../components/ui/toast';
 import { AppHostTreeLayer } from './AppHostTreeLayer';
+import { AppHostEditorLayer } from './AppHostEditorLayer';
 import { getUiThemeById } from '../../infrastructure/config/uiThemes';
 import { buildAppThemeCssVars } from '../state/settingsStateDefaults';
 import { useMainWindowInputFocusRecovery } from '../state/useMainWindowInputFocusRecovery';
+import { useExternalMcpToggleState } from '../state/useExternalMcpToggleState';
+import { PluginContributionHost } from '../../components/plugins/PluginContributionHost';
+import { resolveActivePluginKeybindingContext } from '../state/pluginContributionContexts';
+import { selectPluginThemeTokens } from '../state/pluginContributionEnvironment';
+import { netcattyBridge } from '../../infrastructure/services/netcattyBridge';
+import { pluginViewTabStore, usePluginViewTabs } from '../state/pluginViewTabStore';
+import { buildPluginSettingScopeCatalog } from '../state/usePluginSettingScopeCatalog';
+import { useWorkSurfaceHostEditor } from '../state/useWorkSurfaceHostEditor';
+import { isHostTreeWorkTabSurface } from './workTabSurface';
 
 const LazyProtocolSelectDialog = lazy(() => import('../../components/ProtocolSelectDialog'));
 const LazyQuickSwitcher = lazy(() =>
@@ -55,6 +65,8 @@ const TextEditorTabFallback = ({ tabId }: { tabId: string }) => {
 type AppViewContext = Record<string, any>;
 
 export function AppView({ ctx }: { ctx: AppViewContext }) {
+  const activeTabId = useActiveTabId();
+  const pluginViewTabs = usePluginViewTabs();
   const {
     resetSessionRename,
     resetWorkspaceRename,
@@ -95,7 +107,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
     handleEndSessionDrag, handleFollowAppTerminalThemeChange, handleHostConnectWithProtocolCheck, handleHotkeyAction, handleKeyboardInteractiveCancel, handleKeyboardInteractiveSubmit,
     handleOpenHostFromVaultNote, handleOpenQuickSwitcher, handleOpenSettings, handleOpenVaultHostFromChat, handleOpenVaultNoteFromChat, handleOpenVaultSectionFromChat, handleOpenVaultSnippetFromChat, handleRootContextMenu, handlePassphraseCancel, handlePassphraseSkip, handlePassphraseSubmit, handleProtocolSelect,
     handleRequestCloseEditorTabRef, handleSessionStatusChange, handleSyncNowManual, handleTerminalDataCapture, handleToggleTheme, handleUpdateHostFromTerminal,
-    hostById, hosts, hotkeyScheme, identities, importOrReuseKey, isBroadcastEnabled, isCreateWorkspaceOpen, isMacClient, isQuickSwitcherOpen,
+    hostById, hosts, terminalHosts, updateTerminalHosts, hotkeyScheme, identities, importOrReuseKey, isBroadcastEnabled, isCreateWorkspaceOpen, isMacClient, isQuickSwitcherOpen,
     keyBindings, keyboardInteractiveQueue, keys, logViews, managedSources, navigateToSection, noteGroups, notes, openLogView, openNoteRequest, orderedTabsWithEditors, orphanSessions,
     passphraseQueue, protocolSelectHost, proxyProfiles, portForwardingRules, quickResults, quickSearch, removeSessionFromWorkspace, reorderWorkTabs, reorderWorkspaceSessions,
     resolveEmptyVaultConflict, resolvedTheme, resolveSessionAppearance, runSnippet, sessionLogsDir, sessionLogsEnabled, sessionLogsFormat, sessionLogsTimestampsEnabled, sessionRenameTarget, sshDebugLogsEnabled,
@@ -120,6 +132,59 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
       colorScheme: resolvedTheme,
     } as React.CSSProperties;
   }, [accentMode, customAccent, resolvedTheme, settings.darkUiThemeId, settings.lightUiThemeId]);
+
+  const pluginKeybindingContext = useMemo(() => resolveActivePluginKeybindingContext({
+    activeTabId,
+    sessions,
+    workspaces,
+  }), [activeTabId, sessions, workspaces]);
+  const pluginThemeTokens = useMemo(
+    () => selectPluginThemeTokens(appThemeStyle as Record<string, unknown>),
+    [appThemeStyle],
+  );
+  const isPeerSessionWindow = typeof window !== 'undefined'
+    && window.location.hash.startsWith('#/session-window');
+  const externalMcpToggle = useExternalMcpToggleState();
+  const handleWorkSurfaceHostSaved = useCallback((mode: 'new' | 'edit') => {
+    if (mode === 'edit') {
+      toast.success(t('terminal.layer.hostTree.hostSavedNextConnection'));
+    }
+  }, [t]);
+  const workSurfaceHostEditor = useWorkSurfaceHostEditor({
+    hosts,
+    onUpdateHosts: updateHosts,
+    onSaved: handleWorkSurfaceHostSaved,
+  });
+  const workSurfaceVisible = useMemo(() => isHostTreeWorkTabSurface({
+    enabled: true,
+    activeTabId,
+    logViewIds: new Set(logViews.map((logView: { id: string }) => logView.id)),
+    orderedTabs: orderedTabsWithEditors,
+    sessionIds: new Set(sessions.map((session: { id: string }) => session.id)),
+    workspaceIds: new Set(workspaces.map((workspace: { id: string }) => workspace.id)),
+  }), [activeTabId, logViews, orderedTabsWithEditors, sessions, workspaces]);
+  const handleCreateWorkSurfaceHostGroup = useCallback((groupPath: string) => {
+    updateCustomGroups(Array.from(new Set([...customGroups, groupPath])));
+  }, [customGroups, updateCustomGroups]);
+
+  const closePluginViewTab = useCallback((tabId: string) => {
+    const index = orderedTabsWithEditors.indexOf(tabId);
+    if (activeTabStore.getActiveTabId() === tabId) {
+      const next = orderedTabsWithEditors[index - 1] ?? orderedTabsWithEditors[index + 1] ?? 'vault';
+      activeTabStore.setActiveTabId(next === tabId ? 'vault' : next);
+    }
+    pluginViewTabStore.close(tabId);
+  }, [orderedTabsWithEditors]);
+
+  useEffect(() => {
+    const catalog = buildPluginSettingScopeCatalog({
+      hosts,
+      workspaces,
+      sessions,
+      deviceLabel: t('settings.plugins.thisDevice'),
+    });
+    void netcattyBridge.get()?.setPluginScopeCatalog?.(catalog).catch(() => {});
+  }, [hosts, sessions, t, workspaces]);
 
   return (
     <SnippetExecutionProvider>
@@ -194,6 +259,9 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
         onOpenQuickSwitcher={handleOpenQuickSwitcher}
         onToggleTheme={handleToggleTheme}
         onOpenSettings={handleOpenSettings}
+        externalMcpEnabled={externalMcpToggle.enabled}
+        onToggleExternalMcp={externalMcpToggle.setEnabled}
+        showExternalMcpToggle={!isPeerSessionWindow}
         windowOpacity={settings.windowOpacity}
         setWindowOpacity={settings.setWindowOpacity}
         onSyncNow={handleSyncNowManual}
@@ -205,6 +273,8 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
         showHostTreeSidebar={settings.showHostTreeSidebar}
         dynamicTabTitleMode={settings.terminalSettings.dynamicTabTitleMode}
         editorTabs={editorTabs}
+        pluginViewTabs={pluginViewTabs}
+        onClosePluginViewTab={closePluginViewTab}
         onRequestCloseEditorTab={handleRequestCloseEditorTab}
         hostById={hostById}
       />
@@ -228,7 +298,29 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
           themeById={themeById}
           resolveSessionAppearance={resolveSessionAppearance}
           onConnect={handleConnectToHost}
+          onNewHost={workSurfaceHostEditor.openNew}
+          onEditHost={workSurfaceHostEditor.openEdit}
           onCreateLocalTerminal={handleCreateLocalTerminal}
+        />
+        <AppHostEditorLayer
+          surfaceVisible={workSurfaceVisible}
+          target={workSurfaceHostEditor.target}
+          editorKey={workSurfaceHostEditor.editorKey}
+          hosts={hosts}
+          customGroups={customGroups}
+          groupConfigs={groupConfigs}
+          keys={keys}
+          identities={identities}
+          proxyProfiles={proxyProfiles}
+          managedSources={managedSources}
+          snippets={snippets}
+          terminalThemeId={terminalThemeId}
+          terminalFontSize={terminalFontSize}
+          onSave={workSurfaceHostEditor.save}
+          onCancel={workSurfaceHostEditor.close}
+          onCreateGroup={handleCreateWorkSurfaceHostGroup}
+          onImportOrReuseKey={importOrReuseKey}
+          onUpdateSnippets={updateSnippets}
         />
 
         <VaultViewContainer appThemeStyle={appThemeStyle}>
@@ -246,7 +338,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
             shellHistory={shellHistory}
             connectionLogs={connectionLogs}
             managedSources={managedSources}
-            sessionCount={sessions.length}
+            sessionCount={sessions.filter((s) => !s.hiddenFromTabs).length}
             hotkeyScheme={hotkeyScheme}
             keyBindings={keyBindings}
             terminalThemeId={terminalThemeId}
@@ -282,6 +374,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
             onRunSnippet={runSnippet}
             onOpenLogView={openLogView}
             showRecentHosts={settings.showRecentHosts}
+            hostClickBehavior={settings.hostClickBehavior}
             showOnlyUngroupedHostsInRoot={settings.showOnlyUngroupedHostsInRoot}
             navigateToSection={navigateToSection}
             onNavigateToSectionHandled={() => setNavigateToSection(null)}
@@ -294,13 +387,15 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
         </VaultViewContainer>
 
         <SftpViewMount
-          hosts={hosts}
+          hosts={terminalHosts}
+          writableHosts={hosts}
+          sessions={sessions}
           keys={keys}
           identities={identities}
           knownHosts={effectiveKnownHosts}
           proxyProfiles={proxyProfiles}
           groupConfigs={groupConfigs}
-          updateHosts={updateHosts}
+          updateHosts={updateTerminalHosts}
           onAddKnownHost={handleAddKnownHost}
           sftpDefaultViewMode={sftpDefaultViewMode}
           sftpDoubleClickBehavior={sftpDoubleClickBehavior}
@@ -315,7 +410,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
         />
 
         <TerminalLayerMount
-          hosts={hosts}
+          hosts={terminalHosts}
           portForwardingRules={portForwardingRules}
           customGroups={customGroups}
           groupConfigs={groupConfigs}
@@ -390,7 +485,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
           onCreateLocalTerminal={handleCreateLocalTerminal}
           isBroadcastEnabled={isBroadcastEnabled}
           onToggleBroadcast={toggleBroadcast}
-          updateHosts={updateHosts}
+          updateHosts={updateTerminalHosts}
           updateSnippets={updateSnippets}
           updateSnippetPackages={updateSnippetPackages}
           updateNotes={updateNotes}
@@ -450,6 +545,13 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
             </Suspense>
           </LazyLoadBoundary>
         ))}
+
+        <PluginContributionHost
+          locale={settings.uiLanguage}
+          theme={resolvedTheme}
+          themeTokens={pluginThemeTokens}
+          keybindingContext={pluginKeybindingContext}
+        />
       </div>
 
       {/* Global "quick add / edit snippet" dialog, triggered by the
@@ -558,6 +660,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
                 setQuickSearch('');
               }}
               keyBindings={keyBindings}
+              terminalSettings={terminalSettings}
             />
           </Suspense>
         </LazyLoadBoundary>

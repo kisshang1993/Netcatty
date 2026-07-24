@@ -151,6 +151,111 @@ test("sanitizeHost preserves valid custom host icon fields", () => {
   assert.equal(sanitized.iconColor, "blue");
 });
 
+test("sanitizeHost keeps legacy empty-password hosts on automatic authentication", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: undefined,
+    authMethod: "password",
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, undefined);
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost keeps legacy agent and key hosts on their prior authentication path", () => {
+  for (const legacySettings of [
+    { useSshAgent: true, password: "saved-secret" },
+    { identityFilePaths: ["~/.ssh/id_work"], password: "saved-secret" },
+  ]) {
+    const sanitized = sanitizeHost(makeHost({
+      authMethod: "password",
+      authPolicyVersion: undefined,
+      ...legacySettings,
+    }));
+
+    assert.equal(sanitized.authMethod, undefined);
+    assert.equal(sanitized.authPolicyVersion, 1);
+  }
+});
+
+test("sanitizeHost preserves an explicit password-only choice", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: undefined,
+    authMethod: "password",
+    authPolicyVersion: 1,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost preserves a legacy no-save password-only choice", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: undefined,
+    savePassword: false,
+    authMethod: "password",
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.savePassword, false);
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost keeps legacy no-save agent and key hosts on their prior authentication path", () => {
+  for (const legacySettings of [
+    { useSshAgent: true },
+    { identityFileId: "selected-key" },
+    { identityFilePaths: ["~/.ssh/id_work"] },
+  ]) {
+    const sanitized = sanitizeHost(makeHost({
+      password: undefined,
+      savePassword: false,
+      authMethod: "password",
+      authPolicyVersion: undefined,
+      ...legacySettings,
+    }));
+
+    assert.equal(sanitized.authMethod, undefined);
+    assert.equal(sanitized.authPolicyVersion, 1);
+  }
+});
+
+test("sanitizeHost preserves a legacy whitespace-only password", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: "   ",
+    authMethod: "password",
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.password, "   ");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost preserves an inferred legacy saved password", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: "saved-secret",
+    authMethod: undefined,
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost preserves inferred legacy identity file paths", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: "fallback-secret",
+    authMethod: undefined,
+    authPolicyVersion: undefined,
+    identityFilePaths: ["~/.ssh/id_work"],
+  }));
+
+  assert.equal(sanitized.authMethod, "key");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
 test("sanitizeHost preserves automatic host icon color fields", () => {
   const sanitized = sanitizeHost(makeHost({
     iconMode: "auto",
@@ -180,6 +285,16 @@ test("sanitizeHost trims leading whitespace before extracting the hostname", () 
   }));
 
   assert.equal(sanitized.hostname, "127.0.0.1");
+});
+
+test("sanitizeHost preserves valid per-host SSH timeouts and removes invalid values", () => {
+  const sanitized = sanitizeHost(makeHost({
+    sshTcpConnectTimeoutSeconds: 45.4,
+    sshAuthReadyTimeoutSeconds: 3601,
+  }));
+
+  assert.equal(sanitized.sshTcpConnectTimeoutSeconds, 45);
+  assert.equal(sanitized.sshAuthReadyTimeoutSeconds, undefined);
 });
 
 test("preserves a concurrent terminal timestamp toggle when host details did not edit it", () => {
@@ -334,9 +449,18 @@ test("normalizeDistroId maps Darwin and macOS labels to macos", () => {
   assert.equal(normalizeDistroId("Mac OS X"), "macos");
 });
 
-test("classifyDistroId treats macos as a POSIX stats target", () => {
+test("normalizeDistroId maps FreeBSD uname output to freebsd", () => {
+  assert.equal(normalizeDistroId("FreeBSD"), "freebsd");
+  assert.equal(
+    normalizeDistroId("FreeBSD host.example.com 14.3-RELEASE-p1 GENERIC amd64"),
+    "freebsd",
+  );
+});
+
+test("classifyDistroId limits Linux-like runtime support to implemented POSIX platforms", () => {
   assert.equal(classifyDistroId("macos"), "linux-like");
   assert.equal(classifyDistroId("Darwin"), "linux-like");
+  assert.equal(classifyDistroId("freebsd"), "other");
 });
 
 test("shouldProbeSessionCwd allows the probe on a plain Linux host", () => {

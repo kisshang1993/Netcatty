@@ -4,20 +4,31 @@ const { EventEmitter } = require("node:events");
 
 const { createSessionOpsApi } = require("./sshBridge/sessionOps.cjs");
 
-function fakeStream(stdout) {
+function fakeStream(stdout, waitForWrite = false) {
   const stream = new EventEmitter();
   stream.stderr = new EventEmitter();
-  setImmediate(() => {
+  let sent = false;
+  const send = () => {
+    if (sent) return;
+    sent = true;
     if (stdout) stream.emit("data", Buffer.from(stdout));
     stream.emit("close", 0);
-  });
+  };
+  stream.write = () => {
+    if (waitForWrite) setImmediate(send);
+    return true;
+  };
+  if (!waitForWrite) setImmediate(send);
   return stream;
 }
 
 function fakeConn(stdout) {
   return {
-    exec(_command, cb) {
-      cb(null, fakeStream(stdout));
+    exec(command, cb) {
+      const output = command.includes("NC_LATENCY_MARK") && !stdout.includes("NC_LATENCY_MARK")
+        ? `NC_LATENCY_MARK|${stdout}`
+        : stdout;
+      cb(null, fakeStream(output));
     },
   };
 }
@@ -41,6 +52,7 @@ function makeApi(session, execOnEtSession, extra = {}) {
     iconv: { encodingExists: () => true },
     sessionEncodings: new Map(),
     resetSessionDecoders: () => {},
+    measureTcpConnectLatency: async () => 3,
     ...extra,
   });
 }
@@ -68,10 +80,12 @@ test("getServerStats opens an ET stats companion connection for direct ET sessio
     sshUserHost: "alice@example.test",
     sshOptions: [],
     sshEnv: {},
+    tcpLatencyTarget: { hostname: "example.test", port: 2022 },
     etStatsAuth: { hostname: "example.test", username: "alice" },
   };
   let ensureCalls = 0;
   let execFallbackCalls = 0;
+  const latencyTargets = [];
   const api = makeApi(
     session,
     async () => {
@@ -86,6 +100,10 @@ test("getServerStats opens an ET stats companion connection for direct ET sessio
         s.etStatsConn = fakeConn(LINUX_STATS);
         return s.etStatsConn;
       },
+      measureTcpConnectLatency: async (target) => {
+        latencyTargets.push(target);
+        return 3;
+      },
     },
   );
 
@@ -97,6 +115,8 @@ test("getServerStats opens an ET stats companion connection for direct ET sessio
   assert.equal(result.success, true);
   assert.equal(result.stats.memTotal, 8000);
   assert.equal(result.stats.cpuCores, 4);
+  assert.equal(typeof result.stats.latencyMs, "number");
+  assert.deepEqual(latencyTargets, [{ hostname: "example.test", port: 2022 }]);
 });
 
 test("getServerStats falls back to execOnEtSession for jumped ET sessions", async () => {
@@ -128,6 +148,8 @@ test("getServerStats falls back to execOnEtSession for jumped ET sessions", asyn
   assert.match(command, /CPURAW|UNSUPPORTED_OS/);
   assert.equal(result.success, true);
   assert.equal(result.stats.memTotal, 8000);
+  assert.equal(result.stats.latencyMs, null);
+  assert.doesNotMatch(command, /read -r nc_latency_probe/);
 });
 
 test("getServerStats falls back to execOnEtSession when the direct ET companion is unavailable", async () => {
@@ -157,6 +179,7 @@ test("getServerStats falls back to execOnEtSession when the direct ET companion 
   assert.equal(execFallbackCalls, 1);
   assert.equal(result.success, true);
   assert.equal(result.stats.memTotal, 8000);
+  assert.equal(result.stats.latencyMs, 3);
 });
 
 test("readRemoteHistory probes ET sessions and parses the detected shell", async () => {

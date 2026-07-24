@@ -2,7 +2,7 @@
  * Settings Page - Standalone settings window content
  * This component is rendered in a separate Electron window
  */
-import { AppWindow, Cloud, FileType, HardDrive, Keyboard, Palette, Sparkles, TerminalSquare, X } from "lucide-react";
+import { AppWindow, Cloud, FileType, HardDrive, Keyboard, Palette, Puzzle, Sparkles, TerminalSquare, X } from "lucide-react";
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSettingsState } from "../application/state/useSettingsState";
 import { useAISettingsState } from "../application/state/useAISettingsState";
@@ -16,8 +16,12 @@ import { sanitizePortForwardingRulesForSync } from "../application/syncPayload";
 import { toast } from "./ui/toast";
 import { SettingsTabContent } from "./settings/settings-ui";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { LazyLoadBoundary } from "./ui/lazy-load-boundary";
+import { ExternalMcpApprovalsHost } from "./ai/ExternalMcpApprovalsHost";
+import { useExternalMcpGrantPersister } from "./ai/useExternalMcpGrantPersister";
+import { setupMcpApprovalBridge } from "../infrastructure/ai/shared/approvalGate";
+import { usePluginContributions } from "../application/state/usePluginContributions";
+import { PluginContributionHost } from "./plugins/PluginContributionHost";
 
 const LazySettingsApplicationTab = lazy(() => import("./SettingsApplicationTab"));
 const LazySettingsAppearanceTab = lazy(() => import("./settings/tabs/SettingsAppearanceTab"));
@@ -27,6 +31,7 @@ const LazySettingsAITab = lazy(() => import("./settings/tabs/SettingsAITab"));
 const LazySettingsSyncTab = lazy(() => import("./settings/tabs/SettingsSyncTab"));
 const LazySettingsTerminalTab = lazy(() => import("./settings/tabs/SettingsTerminalTab"));
 const LazySettingsSystemTab = lazy(() => import("./settings/tabs/SettingsSystemTab"));
+const LazySettingsPluginsTab = lazy(() => import("./settings/tabs/SettingsPluginsTab"));
 
 const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
@@ -301,10 +306,17 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
     });
     const [activeTab, setActiveTab] = useState("application");
     const [mountedTabs, setMountedTabs] = useState(() => new Set(["application"]));
+    const { available: pluginRuntimeAvailable } = usePluginContributions();
 
     useEffect(() => {
         notifyRendererReady();
     }, [notifyRendererReady]);
+
+    useEffect(() => {
+        return setupMcpApprovalBridge();
+    }, []);
+
+    useExternalMcpGrantPersister();
 
     useEffect(() => {
         const unsubscribe = onWindowCommandCloseRequested(() => {
@@ -327,6 +339,7 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
     }, [closeSettingsWindow]);
 
     return (
+        <>
         <div className="settings-window h-screen flex flex-col bg-background text-foreground font-sans">
             <div className="shrink-0 border-b border-border app-drag">
                 <div className="flex items-center justify-between px-4 pt-3">
@@ -335,17 +348,16 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
                 <div className="flex items-center justify-between px-4 py-2">
                     <h1 className="text-lg font-semibold">{t("settings.title")}</h1>
                     {!isMac && (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <button
-                                    onClick={handleClose}
-                                    className="app-no-drag w-8 h-8 flex items-center justify-center rounded-md hover:bg-destructive/20 hover:text-destructive transition-colors text-muted-foreground"
-                                >
-                                    <X size={16} />
-                                </button>
-                            </TooltipTrigger>
-                            <TooltipContent>{t("common.close")}</TooltipContent>
-                        </Tooltip>
+                        // No tooltip: on Windows the primary-colored tooltip sits in a
+                        // drag titlebar region, can stick open, and blocks the real X.
+                        <button
+                            type="button"
+                            onClick={handleClose}
+                            aria-label={t("common.close")}
+                            className="app-no-drag w-8 h-8 flex items-center justify-center rounded-md hover:bg-destructive/20 hover:text-destructive transition-colors text-muted-foreground"
+                        >
+                            <X size={16} />
+                        </button>
                     )}
                 </div>
             </div>
@@ -365,6 +377,12 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
                             <AppWindow size={14} className={settingsTabIconClassName} />
                             <span className={settingsTabLabelClassName}>{t("settings.tab.application")}</span>
                         </TabsTrigger>
+                        {pluginRuntimeAvailable && (
+                            <TabsTrigger value="plugins" className={settingsTabTriggerClassName}>
+                                <Puzzle size={14} className={settingsTabIconClassName} />
+                                <span className={settingsTabLabelClassName}>{t("settings.tab.plugins")}</span>
+                            </TabsTrigger>
+                        )}
                         <TabsTrigger
                             value="appearance"
                             className={settingsTabTriggerClassName}
@@ -453,6 +471,8 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
                                 setCustomCSS={settings.setCustomCSS}
                                 showRecentHosts={settings.showRecentHosts}
                                 setShowRecentHosts={settings.setShowRecentHosts}
+                                hostClickBehavior={settings.hostClickBehavior}
+                                setHostClickBehavior={settings.setHostClickBehavior}
                                 showOnlyUngroupedHostsInRoot={settings.showOnlyUngroupedHostsInRoot}
                                 setShowOnlyUngroupedHostsInRoot={settings.setShowOnlyUngroupedHostsInRoot}
                                 showSftpTab={settings.showSftpTab}
@@ -548,6 +568,8 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
                                 setSshDebugLogsEnabled={settings.setSshDebugLogsEnabled}
                                 sshDeepLinkEnabled={settings.sshDeepLinkEnabled}
                                 setSshDeepLinkEnabled={settings.setSshDeepLinkEnabled}
+                                jmsDeepLinkEnabled={settings.jmsDeepLinkEnabled}
+                                setJmsDeepLinkEnabled={settings.setJmsDeepLinkEnabled}
                                 restorePreviousSession={settings.restorePreviousSession}
                                 setRestorePreviousSession={settings.setRestorePreviousSession}
                                 restoreTerminalCwd={settings.restoreTerminalCwd}
@@ -556,6 +578,8 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
                                 setToggleWindowHotkey={settings.setToggleWindowHotkey}
                                 closeToTray={settings.closeToTray}
                                 setCloseToTray={settings.setCloseToTray}
+                                httpNetworkProxy={settings.httpNetworkProxy}
+                                setHttpNetworkProxy={settings.setHttpNetworkProxy}
                                 hotkeyRegistrationError={settings.hotkeyRegistrationError}
                                 globalHotkeyEnabled={settings.globalHotkeyEnabled}
                                 setGlobalHotkeyEnabled={settings.setGlobalHotkeyEnabled}
@@ -569,9 +593,17 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
                             />
                         </SettingsLazyTab>
                     )}
+                    {mountedTabs.has("plugins") && pluginRuntimeAvailable && (
+                        <SettingsLazyTab value="plugins">
+                            <LazySettingsPluginsTab />
+                        </SettingsLazyTab>
+                    )}
                 </div>
             </Tabs>
         </div>
+        <ExternalMcpApprovalsHost />
+        <PluginContributionHost locale={settings.uiLanguage} theme={settings.resolvedTheme} />
+        </>
     );
 };
 

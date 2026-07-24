@@ -18,6 +18,10 @@ import type {
 } from '../../../infrastructure/ai/types';
 import type { ExecutorContext } from '../../../infrastructure/ai/cattyAgent/executor';
 import { getAgentRuntime } from '../../../infrastructure/ai/harness/globalAgentRuntime';
+import type {
+  TurnSteerInput,
+  TurnSteerResult,
+} from '../../../infrastructure/ai/harness/turnDrivers/types';
 import { classifyError } from '../../../infrastructure/ai/errorClassifier';
 import { latestAISessionsSnapshot } from '../../../application/state/aiStateSnapshots';
 import {
@@ -74,12 +78,14 @@ export interface UseAIChatStreamingReturn {
   ) => Promise<void>;
   sendToExternalAgent: (
     sessionId: string,
+    assistantMsgId: string,
     trimmed: string,
     agentConfig: ExternalAgentConfig,
     abortController: AbortController,
     attachedImages: Array<{ base64Data: string; mediaType: string; filename?: string; filePath?: string }>,
     context: SendToExternalContext,
   ) => Promise<void>;
+  steerExternalAgent: (input: TurnSteerInput) => Promise<TurnSteerResult>;
   reportStreamError: (sessionId: string, abortSignal: AbortSignal, err: unknown) => void;
   activeCompaction: import('./useAgentCompactionUi').ActiveCompactionUi | null;
 }
@@ -112,6 +118,7 @@ export interface SendToExternalContext {
   selectedAgentModel?: string;
   toolIntegrationMode: AIToolIntegrationMode;
   selectedUserSkillSlugs?: string[];
+  permissionMode: AIPermissionMode;
 }
 
 export function useAIChatStreaming({
@@ -184,6 +191,7 @@ export function useAIChatStreaming({
 
   const sendToExternalAgent = useCallback(async (
     sessionId: string,
+    assistantMsgId: string,
     trimmed: string,
     agentConfig: ExternalAgentConfig,
     abortController: AbortController,
@@ -194,6 +202,7 @@ export function useAIChatStreaming({
     await getAgentRuntime().runTurn({
       backend: 'external-sdk',
       chatSessionId: sessionId,
+      assistantMsgId,
       userText: trimmed,
       signal: abortController.signal,
       agentConfig,
@@ -203,6 +212,10 @@ export function useAIChatStreaming({
       ui: uiCallbacks(),
     });
   }, [uiCallbacks]);
+
+  const steerExternalAgent = useCallback(async (input: TurnSteerInput) => {
+    return getAgentRuntime().steerTurn(input);
+  }, []);
 
   const sendToCattyAgent = useCallback(async (
     sessionId: string,
@@ -241,6 +254,7 @@ export function useAIChatStreaming({
     abortControllersRef,
     sendToCattyAgent,
     sendToExternalAgent,
+    steerExternalAgent,
     reportStreamError,
     activeCompaction,
   };

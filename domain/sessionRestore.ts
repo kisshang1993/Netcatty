@@ -21,6 +21,7 @@ export type RestoredTerminalSession = {
   localShellArgs?: string[];
   localShellName?: string;
   localShellIcon?: string;
+  localStartDir?: string;
   fontSize?: number;
   fontSizeOverride?: boolean;
   customName?: string;
@@ -108,6 +109,13 @@ const sanitizeSerialConfig = (value: unknown): SerialConfig | undefined => {
     ...(isOneOf(value.flowControl, ["none", "xon/xoff", "rts/cts"] as const) ? { flowControl: value.flowControl } : {}),
     ...(readBoolean(value, "localEcho") !== undefined ? { localEcho: readBoolean(value, "localEcho") } : {}),
     ...(readBoolean(value, "lineMode") !== undefined ? { lineMode: readBoolean(value, "lineMode") } : {}),
+    // A missing value identifies a session saved before serial-specific
+    // Backspace snapshots existed. Keep it missing so a saved-host session can
+    // still pick up its legacy host or group Ctrl+H setting. New sessions
+    // always persist an explicit "default" or "ctrl-h" value.
+    ...(isOneOf(value.backspaceBehavior, ["default", "ctrl-h"] as const)
+      ? { backspaceBehavior: value.backspaceBehavior }
+      : {}),
   };
 };
 
@@ -133,6 +141,7 @@ const restoreSession = (session: TerminalSession): RestoredTerminalSession => {
     ...(session.localShellArgs ? { localShellArgs: [...session.localShellArgs] } : {}),
     ...(session.localShellName ? { localShellName: session.localShellName } : {}),
     ...(session.localShellIcon ? { localShellIcon: session.localShellIcon } : {}),
+    ...(session.localStartDir ? { localStartDir: session.localStartDir } : {}),
     ...(session.fontSize !== undefined ? { fontSize: session.fontSize } : {}),
     ...(session.fontSizeOverride !== undefined ? { fontSizeOverride: session.fontSizeOverride } : {}),
     ...(session.customName ? { customName: session.customName } : {}),
@@ -172,6 +181,7 @@ const restoreSessionFromUnknown = (value: unknown): RestoredTerminalSession | nu
     ...(Array.isArray(value.localShellArgs) ? { localShellArgs: value.localShellArgs.filter((arg): arg is string => typeof arg === "string") } : {}),
     ...(readString(value, "localShellName") ? { localShellName: readString(value, "localShellName") } : {}),
     ...(readString(value, "localShellIcon") ? { localShellIcon: readString(value, "localShellIcon") } : {}),
+    ...(readString(value, "localStartDir") ? { localStartDir: readString(value, "localStartDir") } : {}),
     ...(readNumber(value, "fontSize") !== undefined ? { fontSize: readNumber(value, "fontSize") } : {}),
     ...(readBoolean(value, "fontSizeOverride") !== undefined ? { fontSizeOverride: readBoolean(value, "fontSizeOverride") } : {}),
     ...(readString(value, "customName") ? { customName: readString(value, "customName") } : {}),
@@ -393,7 +403,12 @@ export function buildSessionRestorePayload(input: BuildSessionRestorePayloadInpu
     savedAt: input.now ?? Date.now(),
     activeTabId: input.activeTabId,
     tabOrder: input.tabOrder,
-    sessions: input.sessions.map(restoreSession),
+    // Ephemeral-host sessions (password deep links) cannot be restored: their
+    // in-memory credentials do not survive a relaunch, and persisting them
+    // would leak the supposedly ephemeral host metadata into restore storage.
+    // Silent MCP sessions are likewise excluded — they exist for the duration
+    // of an AI task, not as a user-intended workspace to bring back on launch.
+    sessions: input.sessions.filter((session) => !session.ephemeralHost && !session.hiddenFromTabs).map(restoreSession),
     workspaces: input.workspaces,
   });
 }

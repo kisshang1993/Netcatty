@@ -51,10 +51,16 @@ interface AIChatPanelContentProps {
   inputValue: string;
   setInputValue: (value: string) => void;
   handleSend: () => void;
+  handleSteer: () => void;
   handleStop: () => void;
+  canSteer: boolean;
+  isSteering: boolean;
+  steerWarning?: string;
+  lockTurnConfiguration: boolean;
   canSendCurrentAgent: boolean;
   providerDisplayName?: string;
   modelDisplayName?: string;
+  modelCatalogWarning?: string;
   agentModelPresets: AgentModelPreset[];
   selectedAgentModel: string;
   handleAgentModelSelect: (modelId: string) => void;
@@ -105,10 +111,16 @@ export const AIChatPanelContent: React.FC<AIChatPanelContentProps> = ({
   inputValue,
   setInputValue,
   handleSend,
+  handleSteer,
   handleStop,
+  canSteer,
+  isSteering,
+  steerWarning,
+  lockTurnConfiguration,
   canSendCurrentAgent,
   providerDisplayName,
   modelDisplayName,
+  modelCatalogWarning,
   agentModelPresets,
   selectedAgentModel,
   handleAgentModelSelect,
@@ -256,41 +268,56 @@ export const AIChatPanelContent: React.FC<AIChatPanelContentProps> = ({
           {/* Input area */}
           {!hideInput && (
             <React.Profiler {...getAIPanelProfilerProps('AIChatPanel.Input')}>
-              <ChatInput
-                value={inputValue}
-                onChange={setInputValue}
-                onSend={handleSend}
-                onStop={handleStop}
-                isStreaming={isStreaming}
-                disabled={!canSendCurrentAgent}
-                providerName={providerDisplayName}
-                modelName={modelDisplayName}
-                agentName={currentAgentId === 'catty' ? 'Catty Agent' : externalAgents.find(a => a.id === currentAgentId)?.name}
-                modelPresets={agentModelPresets}
-                selectedModelId={selectedAgentModel}
-                onModelSelect={handleAgentModelSelect}
-                providerSwitcher={
-                  currentAgentId === 'catty' && cattyConfiguredProviders.length > 0
-                    ? {
-                        providers: cattyConfiguredProviders,
-                        selectedProviderId: effectiveActiveProvider?.id,
-                        selectedModelId: effectiveActiveModelId || undefined,
-                        onSelect: handleAgentProviderModelSelect,
-                      }
-                    : undefined
-                }
-                files={files}
-                onAddFiles={addFiles}
-                onRemoveFile={removeFile}
-                hosts={terminalSessions.map(s => ({ sessionId: s.sessionId, hostname: s.hostname, label: s.label, connected: s.connected }))}
-                selectedUserSkills={selectedUserSkills}
-                userSkills={userSkillOptions}
-                quickMessages={quickMessages}
-                onAddUserSkill={addSelectedUserSkill}
-                onRemoveUserSkill={removeSelectedUserSkill}
-                permissionMode={globalPermissionMode}
-                onPermissionModeChange={setGlobalPermissionMode}
-              />
+              <div>
+                {steerWarning ? (
+                  <div role="status" className="mx-3 mb-1.5 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                    {steerWarning}
+                  </div>
+                ) : modelCatalogWarning ? (
+                  <div role="status" className="mx-3 mb-1.5 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                    {modelCatalogWarning}
+                  </div>
+                ) : null}
+                <ChatInput
+                  value={inputValue}
+                  onChange={setInputValue}
+                  onSend={handleSend}
+                  onSteer={handleSteer}
+                  onStop={handleStop}
+                  isStreaming={isStreaming}
+                  canSteer={canSteer}
+                  isSteering={isSteering}
+                  lockTurnConfiguration={lockTurnConfiguration}
+                  disabled={!canSendCurrentAgent}
+                  providerName={providerDisplayName}
+                  modelName={modelDisplayName}
+                  agentName={currentAgentId === 'catty' ? 'Catty Agent' : externalAgents.find(a => a.id === currentAgentId)?.name}
+                  modelPresets={agentModelPresets}
+                  selectedModelId={selectedAgentModel}
+                  onModelSelect={handleAgentModelSelect}
+                  providerSwitcher={
+                    currentAgentId === 'catty' && cattyConfiguredProviders.length > 0
+                      ? {
+                          providers: cattyConfiguredProviders,
+                          selectedProviderId: effectiveActiveProvider?.id,
+                          selectedModelId: effectiveActiveModelId || undefined,
+                          onSelect: handleAgentProviderModelSelect,
+                        }
+                      : undefined
+                  }
+                  files={files}
+                  onAddFiles={addFiles}
+                  onRemoveFile={removeFile}
+                  hosts={terminalSessions.map(s => ({ sessionId: s.sessionId, hostname: s.hostname, label: s.label, connected: s.connected }))}
+                  selectedUserSkills={selectedUserSkills}
+                  userSkills={userSkillOptions}
+                  quickMessages={quickMessages}
+                  onAddUserSkill={addSelectedUserSkill}
+                  onRemoveUserSkill={removeSelectedUserSkill}
+                  permissionMode={globalPermissionMode}
+                  onPermissionModeChange={setGlobalPermissionMode}
+                />
+              </div>
             </React.Profiler>
           )}
         </>

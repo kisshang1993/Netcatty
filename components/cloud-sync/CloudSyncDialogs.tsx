@@ -95,6 +95,8 @@ interface CloudSyncDialogsProps {
   setS3Prefix: StringSetter;
   s3ForcePathStyle: boolean;
   setS3ForcePathStyle: BooleanSetter;
+  s3AllowInsecure: boolean;
+  setS3AllowInsecure: BooleanSetter;
   showS3Secret: boolean;
   setShowS3Secret: BooleanSetter;
   s3Error: string | null;
@@ -129,6 +131,10 @@ interface CloudSyncDialogsProps {
   setShowClearLocalDialog: BooleanSetter;
   onBuildPayload: () => SyncPayload | Promise<SyncPayload>;
   onApplyPayload: (payload: SyncPayload) => void | Promise<void>;
+  onApplyConvergentPayload: (
+    payload: SyncPayload,
+    commitReplica: () => Promise<void>,
+  ) => Promise<void>;
   onClearLocalData?: () => void;
   ensureSyncablePayload: (payload: SyncPayload) => boolean;
   showForcePushConfirm: boolean;
@@ -199,6 +205,8 @@ export const CloudSyncDialogs: React.FC<CloudSyncDialogsProps> = ({
   setS3Prefix,
   s3ForcePathStyle,
   setS3ForcePathStyle,
+  s3AllowInsecure,
+  setS3AllowInsecure,
   showS3Secret,
   setShowS3Secret,
   s3Error,
@@ -233,6 +241,7 @@ export const CloudSyncDialogs: React.FC<CloudSyncDialogsProps> = ({
   setShowClearLocalDialog,
   onBuildPayload,
   onApplyPayload,
+  onApplyConvergentPayload,
   onClearLocalData,
   ensureSyncablePayload,
   showForcePushConfirm,
@@ -344,7 +353,7 @@ export const CloudSyncDialogs: React.FC<CloudSyncDialogsProps> = ({
                                             disabled={historyPreviewLoading}
                                             className={cn(
                                                 "w-full flex items-center justify-between p-2.5 rounded-lg text-left text-sm transition-colors",
-                                                "hover:bg-accent border border-transparent hover:border-border",
+                                                "hover:bg-muted/50 border border-transparent hover:border-border",
                                                 index === 0 && "bg-primary/5 border-primary/20",
                                             )}
                                         >
@@ -573,6 +582,16 @@ export const CloudSyncDialogs: React.FC<CloudSyncDialogsProps> = ({
                         <label className="flex items-center gap-2 text-sm text-muted-foreground select-none">
                             <input
                                 type="checkbox"
+                                checked={s3AllowInsecure}
+                                onChange={(e) => setS3AllowInsecure(e.target.checked)}
+                                className="accent-primary"
+                            />
+                            {t('cloudSync.s3.allowInsecure')}
+                        </label>
+
+                        <label className="flex items-center gap-2 text-sm text-muted-foreground select-none">
+                            <input
+                                type="checkbox"
                                 checked={showS3Secret}
                                 onChange={(e) => setShowS3Secret(e.target.checked)}
                                 className="accent-primary"
@@ -709,7 +728,9 @@ export const CloudSyncDialogs: React.FC<CloudSyncDialogsProps> = ({
                                     }
 
                                     if (payloadForReencrypt) {
-                                        await sync.syncNow(payloadForReencrypt);
+                                        await sync.syncNow(payloadForReencrypt, {
+                                            applyConvergentPayload: onApplyConvergentPayload,
+                                        });
                                     }
 
                                     toast.success(t('cloudSync.changeKey.updatedToast'));
@@ -869,14 +890,17 @@ export const CloudSyncDialogs: React.FC<CloudSyncDialogsProps> = ({
                                     }
                                     setShowForcePushConfirm(false);
                                     try {
-                                        const results = await sync.syncNow(localPayload, { overrideShrink: true });
+                                        const results = await sync.syncNow(localPayload, {
+                                            overrideShrink: true,
+                                            applyConvergentPayload: onApplyConvergentPayload,
+                                        });
 
                                         // Apply any merged payload BEFORE clearing the banner. If a merge happened
                                         // during force-push (remote changed), the merged result is what the cloud
                                         // now has — applying it to local state prevents the next sync from
                                         // re-deleting the remote additions we just merged in.
                                         for (const result of results.values()) {
-                                            if (result.mergedPayload) {
+                                            if (result.mergedPayload && !result.mergedPayloadApplied) {
                                                 await Promise.resolve(onApplyPayload(result.mergedPayload));
                                                 if (result.remoteFile) {
                                                     await sync.commitRemoteInspection(result.provider, result.remoteFile, result.mergedPayload, {

@@ -18,10 +18,10 @@ export const terminalPropsAreEqual = (
   && prev.chainHosts === next.chainHosts
   && themeFingerprint(prev.appearanceTheme ?? prev.terminalTheme) === themeFingerprint(next.appearanceTheme ?? next.terminalTheme)
   && prev.knownHosts === next.knownHosts
-  // TerminalPane owns the actual visibility style and publishes per-session
-  // visibility to paneVisibilityStore. Let Terminal skip visibility-only tab
-  // switches so the expensive terminal subtree is not re-rendered for every
-  // pane when returning to a workspace.
+  // Solo tab switches only flip isVisible. Skipping it leaves isVisibleRef
+  // stale, so hidden panes keep the visible write path and tab-return recovery
+  // in useTerminalEffects never runs (#1985).
+  && prev.isVisible === next.isVisible
   && prev.paneLayoutKey === next.paneLayoutKey
   && prev.inWorkspace === next.inWorkspace
   && prev.isResizing === next.isResizing
@@ -44,6 +44,7 @@ export const terminalPropsAreEqual = (
   && prev.pendingScriptId === next.pendingScriptId
   && prev.pendingScript === next.pendingScript
   && prev.reuseConnectionFromSessionId === next.reuseConnectionFromSessionId
+  && prev.attachExistingSession === next.attachExistingSession
   && prev.serialConfig === next.serialConfig
   && prev.hotkeyScheme === next.hotkeyScheme
   && prev.disableTerminalFontZoom === next.disableTerminalFontZoom
@@ -53,6 +54,7 @@ export const terminalPropsAreEqual = (
   && prev.sessionLog === next.sessionLog
   && prev.sshDebugLogEnabled === next.sshDebugLogEnabled
   && prev.sudoAutofillPassword === next.sudoAutofillPassword
+  && prev.sudoAutofillCandidates === next.sudoAutofillCandidates
   && prev.showSelectionAIAction === next.showSelectionAIAction
   && prev.onHotkeyAction === next.onHotkeyAction
   && prev.onTerminalFontSizeChange === next.onTerminalFontSizeChange
